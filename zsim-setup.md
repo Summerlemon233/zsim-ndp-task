@@ -106,6 +106,7 @@ From now on, we assume we are at the `NDP_PROJECT/` folder, which is referred to
     python /zsim-ndp/zsim-ndp-master/misc/patchRoot/gen_hybridndp_patch_root.py /zsim-ndp/zsim-ndp-master/myPatchRoot/2c4n --bc 2 --bn 2 --sn 2
     python3 ./misc/patchRoot/gen_hetero_patch_root.py /zsim-ndp/zsim-ndp-task/myPatchRoots/patchRoot-64 --bc 64 --bn 64
     python3 ./misc/patchRoot/gen_hetero_patch_root.py /zsim-ndp/zsim-ndp-task/myPatchRoots/patchRoot-128 --bn 128 --bc 128
+    python3 ./misc/patchRoot/gen_hetero_patch_root.py /zsim-ndp/zsim-ndp-task/myPatchRoots/patchRoot-1024 --bc 1024 --bn 1024
 - run zsim
     - modify the `process0.patchRoot` path in `./test/test_ndp1.cfg` to the path of `./myPatchRoot/128c/128n`
     - `/zsim-ndp/zsim-ndp-master/build/opt/zsim /zsim-ndp/zsim-ndp-master/tests/test_ndp1.cfg`

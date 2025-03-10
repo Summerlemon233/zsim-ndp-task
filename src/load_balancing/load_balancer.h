@@ -10,20 +10,17 @@
 
 namespace pimbridge {
 
-// load_balancer.h
-class DataHotness { 
-public: 
-    Address addr; 
-    uint32_t srcBankId; 
-    uint32_t cnt; 
-
-    // 添加默认构造函数
-    DataHotness() : addr(0), srcBankId(0), cnt(0) {}
-
-    DataHotness(Address _addr, uint32_t _srcBankId, uint32_t _cnt) 
-        : addr(_addr), srcBankId(_srcBankId), cnt(_cnt) {}
-
-    void reset() { addr = 0; cnt = 0; } 
+class DataHotness {
+public:
+    Address addr;
+    uint32_t srcBankId;
+    uint32_t cnt;
+    DataHotness(Address _addr, uint32_t _srcBankId, uint32_t _cnt) : 
+        addr(_addr), srcBankId(_srcBankId), cnt(_cnt){}
+    void reset() {
+        addr = 0;
+        cnt = 0;
+    }
 };
 
 /* Each LbCommand targets a single bank (taskUnit)
