@@ -1347,7 +1347,15 @@ VOID HandleTaskDequeueMagicOp(THREADID tid, ADDRINT op, CONTEXT* ctxt) {
         curThread->curTask->state = Task::TaskState::COMPLETED;
         allFinishTask++;
         curTaskUnit->taskFinish(curThread->curTask);
-        if (allFinishTask % 1000 == 0) {
+        if (allFinishTask % 10000 == 0 || allFinishTask == 0) {
+            info("--- Global TaskUnit Queue Sizes at dequeue  ---");
+        for (size_t i = 0; i < zinfo->taskUnits.size(); i++) {
+            TaskUnit* tu = zinfo->taskUnits[i];
+            info("TaskUnit %zu (%s): Ready tasks: %lu, All tasks: %lu", 
+                i, tu->getName(), 
+                tu->getCurUnit()->getReadyTaskQueueSize(),
+                tu->getCurUnit()->getAllTaskQueueSize());
+        }
             info("FinishTaskNumber: %lu", allFinishTask);
         }
     } else if (!curThread->rspCheckpoint) {

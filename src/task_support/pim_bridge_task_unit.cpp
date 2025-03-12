@@ -188,20 +188,49 @@ PimBridgeTaskUnit::PimBridgeTaskUnit(const std::string& _name, uint32_t _tuId,
 
 
 void PimBridgeTaskUnit::assignNewTask(TaskPtr t, Hint* hint) {
-    assert(hint->location == -1);
+    //info("Assigning new Tasks");
     assert(hint->dataPtr != 0);
     if (hint->firstRound) {
         assert(t->timeStamp == 1);
-        uint32_t nodeId = zinfo->numaMap->getNodeOfPage(zinfo->numaMap->getPageAddress(hint->dataPtr));
+        uint32_t nodeId;
+        
+        // Use hint->location (if specified) or select node based on data location
+        if (hint->location >= 0) {
+            // Check if the specified location is valid
+            assert_msg((uint32_t)hint->location < zinfo->numCores, 
+                "Invalid NUMA node ID %d specified in hint. Must be less than numCores (%u)", 
+                hint->location, zinfo->numCores);
+            // Use the specified location
+            nodeId = hint->location;
+
+        } else {
+            // Use the node where the data is located (original strategy)
+            nodeId = zinfo->numaMap->getNodeOfPage(zinfo->numaMap->getPageAddress(hint->dataPtr));
+        }
+        // info("This is the first round. Task unit will enqueue this task to the NUMA node %d",nodeId);
         zinfo->taskUnits[nodeId]->taskEnqueue(t, 0);
     } else {
-        int avail = commModule->checkAvailable(zinfo->numaMap->getLbPageAddress(hint->dataPtr));
-        // info("avail: %d, unit id: %u", avail, taskUnitId);
-        if (avail >= 0) {
-            zinfo->taskUnits[taskUnitId]->taskEnqueue(t, 0);
+        // For non-first rounds, consider using the specified location
+        if (hint->location >= 0) {
+            // Check if the specified location is valid
+            assert_msg((uint32_t)hint->location < zinfo->numCores, 
+                "Invalid NUMA node ID %d specified in hint. Must be less than numCores (%u)", 
+                hint->location, zinfo->numCores);
+            // Use the specified location
+            // info("Non-first round. Task will be enqueued to the nodeId %d", hint->location);
+            zinfo->taskUnits[hint->location]->taskEnqueue(t, 0);
         } else {
-            CommPacket* p = new TaskCommPacket(t->timeStamp, t->readyCycle, 0, this->taskUnitId, 1, -1, t);
-            this->commModule->handleOutPacket(p);
+            // Continue using the original data availability check strategy
+
+            int avail = commModule->checkAvailable(zinfo->numaMap->getLbPageAddress(hint->dataPtr));
+            if (avail >= 0) {
+                zinfo->taskUnits[taskUnitId]->taskEnqueue(t, 0);
+                // info("Non-first round & location == -1. Task will be enqueued to the nodeId %d", taskUnitId);
+            } else {
+                  // info("checkAvailable is not true. Gather-Scatter Needed!");
+                CommPacket* p = new TaskCommPacket(t->timeStamp, t->readyCycle, 0, this->taskUnitId, 1, -1, t);
+                this->commModule->handleOutPacket(p);
+            }
         }
         this->commModule->s_GenTasks.atomicInc(1);
     }
