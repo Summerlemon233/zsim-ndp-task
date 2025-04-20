@@ -1337,7 +1337,7 @@ static GatherScheme* buildGatherScheme(Config& config, const std::string& prefix
     GatherScheme* gatherScheme;
     if (gatherTrigger == "Whenever") {
         gatherScheme = new WheneverGather(packetSize);
-    } if (gatherTrigger == "Never") {
+    } else if (gatherTrigger == "Never") {
         gatherScheme = new NeverGather(packetSize);
     } else if (gatherTrigger == "Interval") {
         uint32_t interval = config.get<uint32_t>(prefix + "interval");

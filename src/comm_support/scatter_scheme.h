@@ -41,7 +41,7 @@ public:
     const uint32_t threshold;
     const uint32_t maxInterval;
     OnDemandScatter(uint32_t _packetSize, uint32_t _threshold, uint32_t _maxInterval)
-        : ScatterScheme(Trigger::AfterGather, _packetSize), 
+        : ScatterScheme(Trigger::OnDemand, _packetSize), 
           threshold(_threshold), maxInterval(_maxInterval) {}
     bool shouldTrigger() override;
 };

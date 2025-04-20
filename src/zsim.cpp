@@ -1380,6 +1380,8 @@ VOID HandleTaskDequeueMagicOp(THREADID tid, ADDRINT op, CONTEXT* ctxt) {
         bool emptyComm = allCommModuleEmpty(finish, false);
         if (finish && emptyComm) {
             endTaskExecution(tid, ctxt, curThread);
+            // info("-----End Task Execution!-----");
+            // info("Will Print the Gather-Scatter Profile to the Path");
             return;
         } else {
             // begin wait. Jump function pointer to the wait-loop

@@ -9,12 +9,10 @@ private:
     class BwUtilEntry {
     public: 
         uint32_t sum;
-        uint32_t transferSizes[4];
-        uint32_t maxNumChild = 4;
+        std::vector<uint32_t> transferSizes;
+        uint32_t maxNumChild = 32; 
         BwUtilEntry() : sum(0) {
-            for (uint32_t i = 0; i < maxNumChild; ++i) {
-                transferSizes[i] = 0;
-            }
+            transferSizes.resize(maxNumChild, 0); 
         }
         void recordTransfer(uint32_t idx, uint32_t size) {
             assert(idx < maxNumChild);
