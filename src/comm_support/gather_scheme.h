@@ -111,7 +111,8 @@ private:
     double avgTaskGenBw;
 public:
     TaskGenerationTrackGather(uint32_t _packetSize)
-        : GatherScheme(Trigger::TaskGenerationTrack, _packetSize) {}
+        : GatherScheme(Trigger::TaskGenerationTrack, _packetSize),
+          lastTransferSize(0), avgTaskGenBw(0.0) {}
     bool shouldTrigger() override;
     void update() override;
 };

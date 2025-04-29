@@ -94,6 +94,28 @@ bool TaskGenerationTrackGather::shouldTrigger() {
 }
 
 void TaskGenerationTrackGather::update() {
-    // TBY TODO
+    // Calculate the total current transfer size
+    uint64_t curTransferSize = 0;
+    for (size_t i = commModule->childBeginId; i < commModule->childEndId; ++i) {
+        uint64_t curSize = commModule->childTransferSize[i-commModule->childBeginId];
+        curTransferSize += curSize >= this->packetSize ? packetSize : curSize;
+    }
+    
+    // Calculate task generation bandwidth (incremental transfer size since the last update)
+    uint64_t deltaSize = (curTransferSize > lastTransferSize) ? 
+                          curTransferSize - lastTransferSize : 0;
+    
+    // Update the average task generation bandwidth using exponential moving average
+    if (avgTaskGenBw == 0.0) {
+        // First update, directly use the current increment as the initial value
+        avgTaskGenBw = static_cast<double>(deltaSize);
+    } else {
+        // Use an exponential moving average with α=0.2 to smooth bandwidth fluctuations
+        constexpr double alpha = 0.2;
+        avgTaskGenBw = alpha * deltaSize + (1.0 - alpha) * avgTaskGenBw;
+    }
+    
+    // Update the last transfer size record for the next calculation
+    lastTransferSize = curTransferSize;
 }
 

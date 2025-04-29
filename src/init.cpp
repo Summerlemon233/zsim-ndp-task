@@ -1353,6 +1353,8 @@ static GatherScheme* buildGatherScheme(Config& config, const std::string& prefix
         uint32_t threshold = config.get<uint32_t>(prefix + "threshold");
         uint32_t maxInterval = config.get<uint32_t>(prefix + "maxInterval");
         gatherScheme = new OnDemandOfAllGather(packetSize, threshold, maxInterval);
+    } else if (gatherTrigger == "TaskGenerationTrack") {
+        gatherScheme = new TaskGenerationTrackGather(packetSize);
     } else {
         panic("unsupported gather scheme: %s", gatherTrigger.c_str());
     }
