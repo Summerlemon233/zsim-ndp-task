@@ -21,6 +21,13 @@ TaskUnit::~TaskUnit() {
 
 // actually enter the task queue
 void TaskUnit::taskEnqueue(TaskPtr t, int available) {
+    // Validate that tasks are only enqueued on active nodes
+    if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
+        assert_msg(zinfo->isActiveNode[this->taskUnitId], 
+            "Attempting to enqueue task on storage node %d. Tasks can only be executed on active nodes.", 
+            this->taskUnitId);
+    }
+    
     DEBUG_TASK_BEHAVIOR_O("task enqueue: unit: %u, id: %lu, ts: %lu, addr: %lu", 
         taskUnitId, t->taskId, t->timeStamp, 
         zinfo->numaMap->getLbPageAddress(t->hint->dataPtr));

@@ -237,6 +237,16 @@ struct GlobSimInfo {
     GatherScatterProfiler* gatherProfiler;
     GatherScatterProfiler* scatterProfiler;
 
+    // Node type configuration for heterogeneous bank architecture
+    uint32_t activeNodeRatio;               // Ratio of active nodes
+    uint32_t storageNodeRatio;              // Ratio of storage nodes
+    g_vector<bool> isActiveNode;            // Which nodes are NDP Banks (active)
+    g_vector<uint32_t> storageToActiveMap;  // Storage node -> responsible active node mapping
+    g_vector<g_vector<uint32_t>> activeToStorageMap; // Active node -> managed storage nodes mapping
+    uint32_t numActiveNodes;                // Number of active nodes
+    uint32_t numStorageNodes;               // Number of storage nodes
+    bool enableComputeRelocation;           // Enable computation relocation feature
+
     // debug
     bool beginDebugOutput;
 

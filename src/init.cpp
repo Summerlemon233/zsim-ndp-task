@@ -1380,26 +1380,184 @@ static ScatterScheme* buildScatterScheme(Config& config, const std::string& pref
     return scatterScheme;
 }
 
+// Initialize node type mapping for heterogeneous bank architecture
+static void initNodeTypeMapping(Config& config) {
+    info("=== Initializing Heterogeneous Bank Architecture ===");
+    
+    // Read node type configuration with strict checking
+    bool hasActiveNodeRatio = config.exists("sys.taskSupport.activeNodeRatio");
+    bool hasStorageNodeRatio = config.exists("sys.taskSupport.storageNodeRatio");
+    
+    if (!hasActiveNodeRatio) {
+        panic("Required configuration 'sys.taskSupport.activeNodeRatio' is missing");
+    }
+    if (!hasStorageNodeRatio) {
+        panic("Required configuration 'sys.taskSupport.storageNodeRatio' is missing");
+    }
+    
+    zinfo->activeNodeRatio = config.get<uint32_t>("sys.taskSupport.activeNodeRatio");
+    zinfo->storageNodeRatio = config.get<uint32_t>("sys.taskSupport.storageNodeRatio");
+    zinfo->enableComputeRelocation = config.get<bool>("sys.taskSupport.enableComputeRelocation", true);
+    
+    info("Configuration read: activeNodeRatio=%d, storageNodeRatio=%d, enableComputeRelocation=%s", 
+         zinfo->activeNodeRatio, zinfo->storageNodeRatio, 
+         zinfo->enableComputeRelocation ? "true" : "false");
+    
+    // Validate configuration
+    if (zinfo->activeNodeRatio == 0) {
+        panic("activeNodeRatio cannot be 0 - at least one active node (NDP Bank) is required");
+    }
+    
+    uint32_t totalRatio = zinfo->activeNodeRatio + zinfo->storageNodeRatio;
+    if (totalRatio == 0) {
+        panic("activeNodeRatio + storageNodeRatio cannot be 0");
+    }
+    if (totalRatio > zinfo->numCores) {
+        panic("activeNodeRatio(%d) + storageNodeRatio(%d) = %d exceeds numCores(%d)", 
+              zinfo->activeNodeRatio, zinfo->storageNodeRatio, totalRatio, zinfo->numCores);
+    }
+    
+    info("Validation passed: totalRatio=%d, numCores=%d", totalRatio, zinfo->numCores);
+    
+    // Initialize data structures
+    zinfo->isActiveNode.resize(zinfo->numCores, false);
+    zinfo->storageToActiveMap.resize(zinfo->numCores, 0);
+    zinfo->activeToStorageMap.resize(zinfo->numCores);
+    
+    info("Initialized data structures for %d cores", zinfo->numCores);
+    
+    // Mark active nodes and count them
+    zinfo->numActiveNodes = 0;
+    for (uint32_t i = 0; i < zinfo->numCores; i++) {
+        if (i % totalRatio < zinfo->activeNodeRatio) {
+            zinfo->isActiveNode[i] = true;
+            zinfo->numActiveNodes++;
+        }
+    }
+    zinfo->numStorageNodes = zinfo->numCores - zinfo->numActiveNodes;
+    
+    info("Node types assigned: %d active nodes (NDP Banks), %d storage nodes (DRAM Banks)", 
+         zinfo->numActiveNodes, zinfo->numStorageNodes);
+    
+    // Build list of active node indices for mapping
+    g_vector<uint32_t> activeNodeIndices;
+    for (uint32_t i = 0; i < zinfo->numCores; i++) {
+        if (zinfo->isActiveNode[i]) {
+            activeNodeIndices.push_back(i);
+        }
+    }
+    
+    // Assign responsible active nodes to each node
+    for (uint32_t i = 0; i < zinfo->numCores; i++) {
+        if (zinfo->isActiveNode[i]) {
+            // Active nodes are responsible for themselves
+            zinfo->storageToActiveMap[i] = i;
+        } else {
+            // Find the nearest active node for storage nodes
+            uint32_t activeNodeIdx = (i / totalRatio) % activeNodeIndices.size();
+            uint32_t responsibleActive = activeNodeIndices[activeNodeIdx];
+            zinfo->storageToActiveMap[i] = responsibleActive;
+            zinfo->activeToStorageMap[responsibleActive].push_back(i);
+        }
+    }
+    
+    info("=== Node Type Mapping Completed ===");
+    info("Total configuration: %d active nodes (NDP Banks), %d storage nodes (DRAM Banks)", 
+         zinfo->numActiveNodes, zinfo->numStorageNodes);
+    
+    // Debug output: print detailed Bank Group configuration
+    info("=== Bank Group Configuration ===");
+    
+    // Print active nodes (NDP Banks)
+    std::stringstream activeNodesStr;
+    activeNodesStr << "NDP Banks (Active Nodes): ";
+    for (uint32_t i = 0; i < zinfo->numCores; i++) {
+        if (zinfo->isActiveNode[i]) {
+            activeNodesStr << i << " ";
+        }
+    }
+    info("%s", activeNodesStr.str().c_str());
+    
+    // Print storage nodes (DRAM Banks) and their responsible active nodes
+    if (zinfo->storageNodeRatio > 0) {
+        std::stringstream storageNodesStr;
+        storageNodesStr << "DRAM Banks (Storage Nodes): ";
+        for (uint32_t i = 0; i < zinfo->numCores; i++) {
+            if (!zinfo->isActiveNode[i]) {
+                storageNodesStr << i << "(->NDP" << zinfo->storageToActiveMap[i] << ") ";
+            }
+        }
+        info("%s", storageNodesStr.str().c_str());
+    }
+    
+    // Print Bank Group details for each active node
+    info("=== Bank Group Management Details ===");
+    for (uint32_t i = 0; i < zinfo->numCores; i++) {
+        if (zinfo->isActiveNode[i]) {
+            if (!zinfo->activeToStorageMap[i].empty()) {
+                std::stringstream bankGroupStr;
+                bankGroupStr << "Bank Group " << i << ": NDP Bank " << i << " manages DRAM Banks ";
+                for (uint32_t storageNode : zinfo->activeToStorageMap[i]) {
+                    bankGroupStr << storageNode << " ";
+                }
+                info("%s", bankGroupStr.str().c_str());
+            } else {
+                info("Bank Group %d: NDP Bank %d (no DRAM Banks managed)", i, i);
+            }
+        }
+    }
+    
+    // Print computation relocation status
+    info("Computation Relocation: %s", 
+         zinfo->enableComputeRelocation ? "ENABLED - Tasks will be routed to appropriate NDP Banks" 
+                                        : "DISABLED - Tasks executed where assigned");
+    
+    info("=== Bank Architecture Initialization Complete ===");
+}
+
 static void InitTaskSupport(Config& config) {
+    info("=== Initializing Task Support System ===");
+    
     zinfo->taskUnitManager = nullptr;
     zinfo->TASK_BASED = config.get<bool>("sys.taskSupport.enable");
-    if (!zinfo->TASK_BASED) { return; }
+    
+    if (!zinfo->TASK_BASED) { 
+        info("Task support is DISABLED"); 
+        return; 
+    }
+    
+    info("Task support is ENABLED");
 
     zinfo->SIM_TASK_FETCH_EVENT = config.get<bool>("sys.pimBridge.simTaskFetchEvent", true);
     zinfo->taskUnits.resize(zinfo->numCores);
     zinfo->taskUnitManager = new TaskUnitManager();
 
+    // Initialize node type mapping for heterogeneous bank architecture
+    initNodeTypeMapping(config);
+
     std::string taskUnitType = 
         config.get<const char*>("sys.taskSupport.taskUnitType");
+    
+    info("Creating task units of type: %s", taskUnitType.c_str());
+    
     if (taskUnitType == "PimBridge" || taskUnitType == "ReserveLbPimBridge") {
         zinfo->IS_PIMBRIDGE = true;
+        info("PimBridge mode ENABLED");
     } else {
         zinfo->IS_PIMBRIDGE = false;
+        info("PimBridge mode DISABLED");
     }
+    
+    uint32_t activeUnitsCreated = 0;
+    uint32_t storageUnitsCreated = 0;
+    
     for (uint32_t i = 0; i < zinfo->numCores; ++i) {
         std::stringstream ss; 
         ss << "unit-" << i;
         TaskUnit* cur = nullptr;
+        
+        const char* nodeType = zinfo->isActiveNode[i] ? "NDP Bank" : "DRAM Bank";
+        
         if (taskUnitType == "PimBridge" || taskUnitType == "ReserveLbPimBridge"
             || taskUnitType == "LimitedReserveLbPimBridge") {
             cur = new PimBridgeTaskUnit(ss.str(), i, zinfo->taskUnitManager, config);
@@ -1408,7 +1566,18 @@ static void InitTaskSupport(Config& config) {
         } else {
             panic("unsupported task unit type: %s", taskUnitType.c_str());
         }
+        
         zinfo->taskUnits[i] = cur;
+        
+        if (zinfo->isActiveNode[i]) {
+            activeUnitsCreated++;
+            info("Created task unit %d (%s) - Type: %s [CAN EXECUTE TASKS]", 
+                 i, nodeType, taskUnitType.c_str());
+        } else {
+            storageUnitsCreated++;
+            info("Created task unit %d (%s) - Type: %s [STORAGE ONLY - managed by NDP Bank %d]", 
+                 i, nodeType, taskUnitType.c_str(), zinfo->storageToActiveMap[i]);
+        }
         zinfo->taskUnitManager->addTaskUnit(zinfo->taskUnits[i]);
     }
 

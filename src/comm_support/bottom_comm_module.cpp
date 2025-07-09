@@ -118,17 +118,51 @@ void BottomCommModule::handleInPacket(CommPacket* packet) {
 
 int BottomCommModule::checkAvailable(Address lbPageAddr) {
     Address pageAddr = zinfo->numaMap->getPageAddressFromLbPageAddress(lbPageAddr);
-    uint32_t nodeId = zinfo->numaMap->getNodeOfPage(pageAddr);
+    uint32_t dataNodeId = zinfo->numaMap->getNodeOfPage(pageAddr);
+    
+    // Check address remapping first
     int remap = this->addrRemapTable->getChildRemap(lbPageAddr);
     if (remap != -1) {
-        assert(nodeId != this->commId && !this->addrRemapTable->getAddrBorrowMidState(lbPageAddr));
-        return 0;
-    } else if (this->addrRemapTable->getAddrBorrowMidState(lbPageAddr)) {
-        return -2;
-    } else if (nodeId == this->commId && !this->addrRemapTable->getAddrLend(lbPageAddr)) {
-        return 0;
+        assert(dataNodeId != this->commId && !this->addrRemapTable->getAddrBorrowMidState(lbPageAddr));
+        return 0;  // Data is remapped and available
+    }
+    
+    // Check if data is in borrowing state (transfer in progress)
+    if (this->addrRemapTable->getAddrBorrowMidState(lbPageAddr)) {
+        return -2;  // Transfer in progress
+    }
+    
+    // Enhanced availability check with node type awareness
+    if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
+        if (dataNodeId == this->commId) {
+            // Data is on local node
+            if (zinfo->isActiveNode[this->commId]) {
+                // Local node is active, check if data is not lent out
+                return !this->addrRemapTable->getAddrLend(lbPageAddr) ? 0 : -1;
+            } else {
+                // Local node is storage node - this should not happen
+                // as tasks should only execute on active nodes
+                panic("Task should not be executed on storage node %d", this->commId);
+            }
+        } else {
+            // Data is on remote node
+            if (!zinfo->isActiveNode[dataNodeId]) {
+                // Data is on a storage node, check if current node is responsible for it
+                if (zinfo->storageToActiveMap[dataNodeId] == this->commId) {
+                    // Current active node is responsible for this storage node
+                    return !this->addrRemapTable->getAddrLend(lbPageAddr) ? 0 : -1;
+                }
+            }
+            // Data is on other active node or storage node managed by other active node
+            return -1;  // Data not available locally
+        }
     } else {
-        return -1;
+        // Fallback to original logic if compute relocation is disabled
+        if (dataNodeId == this->commId && !this->addrRemapTable->getAddrLend(lbPageAddr)) {
+            return 0;
+        } else {
+            return -1;
+        }
     }
 }
 
