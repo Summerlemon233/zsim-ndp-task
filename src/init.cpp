@@ -97,6 +97,7 @@
 #include "comm_support/gather_scheme.h"
 #include "comm_support/scatter_scheme.h"
 #include "load_balancing/load_balancer.h"
+#include "load_balancing/bank_group_load_balancer.h"
 #include "load_balancing/reserve_lb_task_unit.h"
 
 using namespace std;
@@ -1706,6 +1707,8 @@ static void buildLoadBalancer(Config& config) {
                 lb = new TryReserveLoadBalancer(config, level, commId);
             } else if (lbType == "FastArrive") {    
                 lb = new FastArriveLoadBalancer(config, level, commId);
+            } else if (lbType == "BankGroup") {
+                lb = new BankGroupLoadBalancer(config, level, commId);
             }  else if (lbType == "Reserve") {
                 std::string taskUnitType = config.get<const char*>("sys.taskSupport.taskUnitType");
                 // assert(taskUnitType == "ReserveLbPimBridge");

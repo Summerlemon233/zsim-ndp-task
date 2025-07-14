@@ -8,6 +8,7 @@
 #include "gather_scheme.h"
 #include "scatter_scheme.h"
 #include "numa_map.h"
+#include "load_balancing/bank_group_load_balancer.h"
 
 using namespace pimbridge;
 using namespace task_support;
@@ -87,20 +88,42 @@ void CommModule::commandLoadBalance(bool* needParentLevelLb) {
         return;
     }
     DEBUG_LB_O("module %s begin command lb", this->getName());
-    this->loadBalancer->generateCommand(needParentLevelLb);
-    // The information of scheduled out data
-    // write in executeLoadBalance (by lb executors)
-    // read in assignLbTarget (by lb commanders)
-    std::vector<DataHotness> outInfo;
-    outInfo.clear();
-    for (uint32_t i = this->bankBeginId; i < bankEndId; ++i) {
-        const LbCommand& curCommand = loadBalancer->commands[i-bankBeginId];
-        uint32_t childCommId = zinfo->commMapping->getCommId(level-1, i);
-        if (!curCommand.empty()) {
-            zinfo->commModules[level-1][childCommId]->executeLoadBalance(curCommand, i, outInfo);
+    
+    // 检查是否使用新的Bank Group负载均衡器
+    BankGroupLoadBalancer* bankGroupLB = dynamic_cast<BankGroupLoadBalancer*>(this->loadBalancer);
+    if (bankGroupLB != nullptr) {
+        // 更新Bank负载信息
+        std::vector<uint32_t> queueLengths = getBankQueueLengths();
+        bankGroupLB->updateBankLoads(queueLengths);
+        
+        // 生成Bank Group重分配命令
+        bankGroupLB->generateCommand(needParentLevelLb);
+        
+        // 执行Bank Group重分配
+        std::vector<DataHotness> outInfo;
+        for (uint32_t i = this->bankBeginId; i < bankEndId; ++i) {
+            const BankGroupCommand& cmd = bankGroupLB->getBankGroupCommand(i-bankBeginId);
+            if (!cmd.empty()) {
+                uint32_t childCommId = zinfo->commMapping->getCommId(level-1, i);
+                zinfo->commModules[level-1][childCommId]->executeBankGroupLoadBalance(cmd, i);
+            }
         }
-    }
-    this->loadBalancer->assignLbTarget(outInfo);   
+        
+        bankGroupLB->assignLbTarget(outInfo);
+    } else {
+        // 使用传统的负载均衡机制
+        this->loadBalancer->generateCommand(needParentLevelLb);
+        std::vector<DataHotness> outInfo;
+        outInfo.clear();
+        for (uint32_t i = this->bankBeginId; i < bankEndId; ++i) {
+            const LbCommand& curCommand = loadBalancer->commands[i-bankBeginId];
+            uint32_t childCommId = zinfo->commMapping->getCommId(level-1, i);
+            if (!curCommand.empty()) {
+                zinfo->commModules[level-1][childCommId]->executeLoadBalance(curCommand, i, outInfo);
+            }
+        }
+        this->loadBalancer->assignLbTarget(outInfo);
+    }   
 }
 
 void CommModule::executeLoadBalance(
@@ -318,4 +341,66 @@ void CommModule::initStats(AggregateStat* parentStat) {
     commStat->append(&sv_ScatterPackets);
 
     parentStat->append(commStat);
+}
+
+// 新增的Bank Group负载均衡接口实现
+void CommModule::executeBankGroupLoadBalance(const BankGroupCommand& command, uint32_t sourceBankId) {
+    DEBUG_LB_O("comm %s execute bank group lb for bank %u", this->getName(), sourceBankId);
+    
+    // 处理数据重分配命令
+    const auto& dataReassignments = command.getDataReassignments();
+    for (const auto& reassignment : dataReassignments) {
+        Address addr = reassignment.first;
+        uint32_t newOwnerBank = reassignment.second;
+        handleDataReassignment(addr, newOwnerBank);
+    }
+    
+    // 处理Bank Group重分配命令
+    const auto& groupReassignments = command.getGroupReassignments();
+    if (!groupReassignments.empty()) {
+        updateBankGroupMapping(groupReassignments);
+    }
+    
+    DEBUG_LB_O("Bank group load balance executed: %zu data reassignments, %zu group reassignments",
+              dataReassignments.size(), groupReassignments.size());
+}
+
+void CommModule::updateBankGroupMapping(const std::vector<uint32_t>& newGroupAssignments) {
+    // 更新Bank到Group的映射关系
+    // 这里需要与底层的地址重映射表协同工作
+    for (size_t bankId = 0; bankId < newGroupAssignments.size(); bankId++) {
+        uint32_t newGroupId = newGroupAssignments[bankId];
+        if (newGroupId != UINT32_MAX) {
+            DEBUG_LB_O("Bank %zu reassigned to group %u", bankId, newGroupId);
+            // 这里可以添加具体的Group重分配逻辑
+        }
+    }
+}
+
+void CommModule::handleDataReassignment(Address addr, uint32_t newOwnerBank) {
+    // 处理数据的重分配：更新地址重映射表
+    if (this->addrRemapTable) {
+        // 建立新的地址映射关系
+        this->addrRemapTable->setChildRemap(addr, newOwnerBank);
+        DEBUG_LB_O("Data at address 0x%lx reassigned to bank %u", addr, newOwnerBank);
+    }
+}
+
+std::vector<uint32_t> CommModule::getBankQueueLengths() {
+    std::vector<uint32_t> queueLengths;
+    queueLengths.reserve(bankEndId - bankBeginId);
+    
+    for (uint32_t i = bankBeginId; i < bankEndId; i++) {
+        queueLengths.push_back(static_cast<uint32_t>(bankQueueLength[i - bankBeginId]));
+    }
+    
+    return queueLengths;
+}
+
+void CommModule::updateBankTypes(const std::vector<bool>& activeFlags, const std::vector<bool>& storageFlags) {
+    // 更新Bank类型信息，用于负载均衡器
+    BankGroupLoadBalancer* bankGroupLB = dynamic_cast<BankGroupLoadBalancer*>(this->loadBalancer);
+    if (bankGroupLB != nullptr) {
+        bankGroupLB->initializeBankTypes(activeFlags, storageFlags);
+    }
 }

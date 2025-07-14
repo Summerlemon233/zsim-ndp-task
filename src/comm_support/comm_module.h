@@ -14,11 +14,15 @@
 #include "comm_support/gather_scheme.h"
 #include "comm_support/scatter_scheme.h"
 #include "load_balancing/load_balancer.h"
+#include "load_balancing/bank_group_load_balancer.h"
 #include "load_balancing/address_remap.h"
 
 using namespace task_support;
 
 namespace pimbridge {
+
+// 前向声明
+class BankGroupCommand;
 
 class CommModuleBase {
 protected:
@@ -75,6 +79,11 @@ public:
     virtual void commandLoadBalance(bool* needParentLevelLb) = 0;
     virtual void executeLoadBalance(const LbCommand& command,  
         uint32_t targetBankId, std::vector<DataHotness>& outInfo) = 0;
+    
+    // Bank Group负载均衡接口（默认实现为空，仅在CommModule中实现）
+    virtual void executeBankGroupLoadBalance(const BankGroupCommand& command, uint32_t sourceBankId) {
+        // 默认空实现，避免纯虚函数调用错误
+    }
         
     virtual void addToSteal(uint64_t val) { panic("?!"); }
     virtual uint64_t getToSteal() { panic("?!"); }
@@ -208,6 +217,13 @@ public:
     void commandLoadBalance(bool* needParentLevelLb) override;
     void executeLoadBalance(const LbCommand& command, 
         uint32_t targetBankId, std::vector<DataHotness>& outInfo);
+    
+    // Bank Group负载均衡新接口
+    void executeBankGroupLoadBalance(const BankGroupCommand& command, uint32_t sourceBankId);
+    void updateBankGroupMapping(const std::vector<uint32_t>& newGroupAssignments);
+    void handleDataReassignment(Address addr, uint32_t newOwnerBank);
+    std::vector<uint32_t> getBankQueueLengths();
+    void updateBankTypes(const std::vector<bool>& activeFlags, const std::vector<bool>& storageFlags);
         
     bool isEmpty(uint64_t ts = 0) override;
     
