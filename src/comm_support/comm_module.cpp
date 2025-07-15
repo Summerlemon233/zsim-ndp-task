@@ -400,14 +400,6 @@ void CommModule::initStats(AggregateStat* parentStat) {
 void CommModule::executeBankGroupLoadBalance(const BankGroupCommand& command, uint32_t sourceBankId) {
     DEBUG_LB_O("comm %s execute bank group lb for bank %u", this->getName(), sourceBankId);
     
-    // 处理数据重分配命令
-    const auto& dataReassignments = command.getDataReassignments();
-    for (const auto& reassignment : dataReassignments) {
-        Address addr = reassignment.first;
-        uint32_t newOwnerBank = reassignment.second;
-        handleDataReassignment(addr, newOwnerBank);
-    }
-    
     // 处理Bank Group重分配命令
     const auto& groupReassignments = command.getGroupReassignments();
     if (!groupReassignments.empty()) {
@@ -426,8 +418,8 @@ void CommModule::executeBankGroupLoadBalance(const BankGroupCommand& command, ui
         executeTaskMigration(migration);
     }
     
-    DEBUG_LB_O("Bank group load balance executed: %zu data reassignments, %zu group reassignments, %zu storage bank reassignments, %zu task migrations",
-              dataReassignments.size(), groupReassignments.size(), storageBankReassignments.size(), taskMigrations.size());
+    DEBUG_LB_O("Bank group load balance executed: %zu group reassignments, %zu storage bank reassignments, %zu task migrations",
+              groupReassignments.size(), storageBankReassignments.size(), taskMigrations.size());
 }
 
 void CommModule::updateBankGroupMapping(const std::vector<uint32_t>& newGroupAssignments) {
@@ -439,15 +431,6 @@ void CommModule::updateBankGroupMapping(const std::vector<uint32_t>& newGroupAss
             DEBUG_LB_O("Bank %zu reassigned to group %u", bankId, newGroupId);
             // 这里可以添加具体的Group重分配逻辑
         }
-    }
-}
-
-void CommModule::handleDataReassignment(Address addr, uint32_t newOwnerBank) {
-    // 处理数据的重分配：更新地址重映射表
-    if (this->addrRemapTable) {
-        // 建立新的地址映射关系
-        this->addrRemapTable->setChildRemap(addr, newOwnerBank);
-        DEBUG_LB_O("Data at address 0x%lx reassigned to bank %u", addr, newOwnerBank);
     }
 }
 
@@ -530,23 +513,6 @@ void CommModule::executeStorageBankReassignment(const StorageBankReassignment& r
     
     info("Storage bank reassignment completed: bank %u now handled by active bank %u",
          reassignment.storageBankId, targetActiveBank);
-}
-
-void CommModule::executeAddressRemapping(const std::pair<uint64_t, uint64_t>& remapping) {
-    // 执行地址重映射
-    uint64_t oldAddress = remapping.first;
-    uint64_t newAddress = remapping.second;
-    
-    // 通过地址重映射表更新地址映射
-    if (this->addrRemapTable) {
-        // 提取Bank ID（简化实现）
-        uint32_t newBankId = static_cast<uint32_t>(newAddress & 0xFFFF);
-        Address addr = static_cast<Address>(oldAddress);
-        
-        this->addrRemapTable->setChildRemap(addr, newBankId);
-    }
-    
-    info("Address remapping executed: 0x%lx -> 0x%lx", oldAddress, newAddress);
 }
 
 void CommModule::executeTaskMigration(const TaskMigration& migration) {

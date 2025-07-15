@@ -114,18 +114,6 @@ void BankGroupLoadBalancer::updateBankLoads(const std::vector<uint32_t>& queueLe
     DEBUG_LB_O("Updated bank loads: avgLoad=%.2f, activeCount=%u", avgLoadFactor, activeCount);
 }
 
-void BankGroupLoadBalancer::updateDataOwnership(Address addr, uint32_t bankId) {
-    uint32_t oldOwner = dataOwnership[addr];
-    if (oldOwner != bankId) {
-        // Update data ownership
-        if (oldOwner != 0) {
-            bankOwnedData[oldOwner].erase(addr);
-        }
-        dataOwnership[addr] = bankId;
-        bankOwnedData[bankId].insert(addr);
-    }
-}
-
 void BankGroupLoadBalancer::updateBankTaskClassification(const std::vector<uint32_t>& queueLengths) {
     // Reset statistics
     localDataTaskCount.assign(totalBanks, 0);
@@ -191,11 +179,10 @@ double BankGroupLoadBalancer::calculateLoadFactor(uint32_t bankId) {
         return 0.0; // Storage bank load is always 0
     }
     
-    // Load factor = queue length + weighted amount of managed data
+    // Load factor = queue length (removed data ownership component)
     double queueLoad = static_cast<double>(bankQueueLengths[bankId]);
-    double dataLoad = static_cast<double>(bankOwnedData[bankId].size()) * 0.1; // Data weight is configurable
     
-    return queueLoad + dataLoad;
+    return queueLoad;
 }
 
 double BankGroupLoadBalancer::calculateGroupLoad(uint32_t groupId) {
@@ -475,17 +462,17 @@ void BankGroupLoadBalancer::generateCommand(bool* needParentLevelLb) {
     validateBankGroupConfiguration();
     totalLoadBalanceOperations++;
     
-    // 执行基础验证
+    // Perform basic validation
     validateTaskAccounting();
     
-    // 检测负载不均衡
+    // Detect load imbalance
     if (!detectLoadImbalance()) {
         info("No Bank Group load imbalance detected, skipping rebalancing");
         *needParentLevelLb = false;
         return;
     }
     
-    // 输出当前负载状态
+    // Output current load status
     info("Bank Group Load Balancing - Current state:");
     for (uint32_t groupId = 0; groupId < numGroups; groupId++) {
         double groupLoad = calculateGroupLoad(groupId);
@@ -496,28 +483,27 @@ void BankGroupLoadBalancer::generateCommand(bool* needParentLevelLb) {
              bankQueueLengths[activeBankId] - localDataTaskCount[activeBankId]);
     }
     
-    // 生成Bank Group重分配策略
+    // Generate Bank Group reassignment strategy
     generateGroupReassignments();
-    generateDataReassignments();
     
-    // 生成任务迁移策略
+    // Generate task migration strategy
     if (enableTaskMigration) {
         generateTaskMigrations();
         totalTaskMigrations++;
     }
     
-    // 执行存储Bank重分配
+    // Execute storage bank reassignment
     if (enableStorageBankReassignment) {
         executeStorageBankReassignments();
         totalStorageBankReassignments++;
     }
     
-    // 执行任务迁移
+    // Execute task migrations
     if (enableTaskMigration) {
         executeTaskMigrations();
     }
     
-    // 检查是否需要上级负载均衡
+    // Check if parent level load balancing is needed
     bool hasCommands = false;
     for (const auto& cmd : bankGroupCommands) {
         if (!cmd.empty()) {
@@ -526,13 +512,12 @@ void BankGroupLoadBalancer::generateCommand(bool* needParentLevelLb) {
         }
     }
     
-    *needParentLevelLb = !hasCommands; // 如果本级无法解决，需要上级介入
+    *needParentLevelLb = !hasCommands; // If this level cannot solve, parent level is needed
     
     if (hasCommands) {
         info("Generated Bank Group load balancing commands");
-        totalDataReassignments++;
         
-        // Phase 4: 负载均衡后的验证和统计
+        // Phase 4: Post-balancing validation and statistics
         printLoadBalancingStatistics();
         printBankGroupMappings();
         validateTaskCounts();
@@ -542,7 +527,7 @@ void BankGroupLoadBalancer::generateCommand(bool* needParentLevelLb) {
 }
 
 void BankGroupLoadBalancer::generateGroupReassignments() {
-    // 识别过载和欠载的Bank Group
+    // Identify overloaded and underloaded Bank Groups
     std::vector<uint32_t> overloadedGroups = selectOverloadedGroups();
     std::vector<uint32_t> underloadedGroups = selectUnderloadedGroups();
     
@@ -555,7 +540,7 @@ void BankGroupLoadBalancer::generateGroupReassignments() {
     info("Found %zu overloaded groups and %zu underloaded groups", 
          overloadedGroups.size(), underloadedGroups.size());
     
-    // 对每个过载的Group，尝试重分配其最重的存储Bank
+    // For each overloaded group, try to reassign its heaviest storage bank
     for (uint32_t overloadedGroup : overloadedGroups) {
         uint32_t heaviestStorageBank = selectHeaviestStorageBank(overloadedGroup);
         if (heaviestStorageBank == 0) continue;
@@ -568,32 +553,26 @@ void BankGroupLoadBalancer::generateGroupReassignments() {
         uint32_t targetGroup = selectLightestGroup(underloadedGroups);
         if (targetGroup == overloadedGroup) continue;
         
-        // 创建存储Bank重分配命令
+        // Create storage bank reassignment command
         StorageBankReassignment reassignment(heaviestStorageBank, overloadedGroup, targetGroup, taskCount);
         
-        // 执行存储Bank重分配
+        // Execute storage bank reassignment
         info("Reassigning storage bank %u (tasks=%u) from group %u to group %u", 
              heaviestStorageBank, taskCount, overloadedGroup, targetGroup);
         
         reassignStorageBankToGroup(heaviestStorageBank, overloadedGroup, targetGroup);
         
-        // 生成重分配命令
+        // Generate reassignment command
         uint32_t sourceActiveBank = findActiveBankInGroup(overloadedGroup);
         bankGroupCommands[sourceActiveBank].addStorageBankReassignment(reassignment);
         
-        // 更新统计数据
-        storageDataTaskCount[heaviestStorageBank] = 0; // 将在新Group中重新分配
+        // Update statistics
+        storageDataTaskCount[heaviestStorageBank] = 0; // Will be redistributed in the new group
         
-        // 从欠载列表中移除已分配的目标Group，避免重复分配
+        // Remove the assigned target group from underloaded list to avoid duplicate assignment
         underloadedGroups.erase(std::remove(underloadedGroups.begin(), underloadedGroups.end(), targetGroup), 
                                underloadedGroups.end());
     }
-}
-
-void BankGroupLoadBalancer::generateDataReassignments() {
-    // 第一阶段暂时保留空实现
-    // 数据重分配将在后续阶段实现
-    info("Data reassignment not implemented in current phase");
 }
 
 std::vector<uint32_t> BankGroupLoadBalancer::selectOverloadedBanks() {
@@ -611,7 +590,7 @@ std::vector<uint32_t> BankGroupLoadBalancer::selectOverloadedBanks() {
 
 std::vector<uint32_t> BankGroupLoadBalancer::selectUnderloadedBanks() {
     std::vector<uint32_t> underloaded;
-    double threshold = avgLoadFactor * 0.5; // 50%平均负载以下视为欠载
+    double threshold = avgLoadFactor * 0.5; // Below 50% of average load is considered underloaded
     
     for (uint32_t bankId : activeBankList) {
         if (bankLoadFactors[bankId] < threshold) {
@@ -625,7 +604,7 @@ std::vector<uint32_t> BankGroupLoadBalancer::selectUnderloadedBanks() {
 uint32_t BankGroupLoadBalancer::findBestTargetBank(Address addr, const std::vector<uint32_t>& candidates) {
     if (candidates.empty()) return 0;
     
-    // 选择负载最低的Bank
+    // Select the bank with the lowest load
     uint32_t bestBank = candidates[0];
     double minLoad = bankLoadFactors[bestBank];
     
@@ -643,7 +622,7 @@ void BankGroupLoadBalancer::rebalanceWithinGroup(uint32_t groupId) {
     const auto& groupBanks = groupToBanks[groupId];
     if (groupBanks.size() <= 1) return;
     
-    // 计算Group内负载分布
+    // Calculate load distribution within the group
     double groupTotalLoad = 0.0;
     for (uint32_t bankId : groupBanks) {
         groupTotalLoad += bankLoadFactors[bankId];
@@ -651,13 +630,13 @@ void BankGroupLoadBalancer::rebalanceWithinGroup(uint32_t groupId) {
     
     double groupAvgLoad = groupTotalLoad / groupBanks.size();
     
-    // 在Group内重分配过载Bank的数据
+    // Redistribute data from overloaded banks within the group
     for (uint32_t bankId : groupBanks) {
         if (bankLoadFactors[bankId] > groupAvgLoad * 1.5) {
-            // 这个Bank在Group内过载，需要重分配部分数据
+            // This bank is overloaded within the group and needs to redistribute some data
             for (uint32_t targetBank : groupBanks) {
                 if (targetBank != bankId && bankLoadFactors[targetBank] < groupAvgLoad * 0.8) {
-                    // 可以接收数据的目标Bank
+                    // Target bank can receive data
                     bankGroupCommands[bankId].addGroupReassignment(bankId, groupId);
                     break;
                 }
@@ -667,7 +646,7 @@ void BankGroupLoadBalancer::rebalanceWithinGroup(uint32_t groupId) {
 }
 
 void BankGroupLoadBalancer::rebalanceBetweenGroups() {
-    // 计算各Group的总负载
+    // Calculate total load for each group
     std::vector<double> groupLoads(numGroups, 0.0);
     std::vector<uint32_t> groupSizes(numGroups, 0);
     
@@ -678,18 +657,18 @@ void BankGroupLoadBalancer::rebalanceBetweenGroups() {
         }
     }
     
-    // 寻找负载差异显著的Group并重分配
+    // Find groups with significant load differences and redistribute
     for (uint32_t i = 0; i < numGroups; i++) {
         for (uint32_t j = i + 1; j < numGroups; j++) {
             double loadDiff = std::abs(groupLoads[i] - groupLoads[j]);
             double avgLoad = (groupLoads[i] + groupLoads[j]) / 2.0;
             
-            if (loadDiff > avgLoad * 0.5) { // 负载差异超过50%
-                // 考虑Group间Bank重分配
+            if (loadDiff > avgLoad * 0.5) { // Load difference exceeds 50%
+                // Consider moving a bank from the source group to the target group
                 uint32_t sourceGroup = groupLoads[i] > groupLoads[j] ? i : j;
                 uint32_t targetGroup = groupLoads[i] > groupLoads[j] ? j : i;
                 
-                // 选择源Group中负载较低的Bank移动到目标Group
+                // Select the bank with the lowest load in the source group to move to the target group
                 if (groupToBanks[sourceGroup].size() > 1) {
                     uint32_t bankToMove = 0;
                     double minLoad = std::numeric_limits<double>::max();
@@ -712,17 +691,9 @@ void BankGroupLoadBalancer::rebalanceBetweenGroups() {
 }
 
 void BankGroupLoadBalancer::assignLbTarget(const std::vector<DataHotness>& outInfo) {
-    // 处理数据热度信息，用于优化数据分配决策
-    for (const auto& hotness : outInfo) {
-        Address addr = hotness.addr;
-        uint32_t srcBank = hotness.srcBankId;
-        uint32_t accessCount = hotness.cnt;
-        
-        // 如果数据访问频率很高，考虑将其重分配到访问它的Bank
-        if (accessCount > 10) { // 可配置阈值
-            updateDataOwnership(addr, srcBank);
-        }
-    }
+    // Process data hotness information for future optimization
+    // For now, we skip data reassignment and focus on Bank Group remapping and task migration
+    info("Processed %zu data hotness entries (data reassignment disabled)", outInfo.size());
 }
 
 void BankGroupLoadBalancer::resetCommands() {
@@ -739,12 +710,12 @@ void BankGroupLoadBalancer::logReassignmentDecision(const std::string& reason,
          reason.c_str(), fromBank, toBank, dataCount);
 }
 
-// ===== Phase 3: 任务迁移实现 =====
+// ===== Phase 3: Task Migration Implementation =====
 
 void BankGroupLoadBalancer::generateTaskMigrations() {
     info("Starting task migration generation");
     
-    // 识别负载不均衡的Bank对
+    // Identify overloaded and underloaded bank pairs
     std::vector<uint32_t> overloadedBanks;
     std::vector<uint32_t> underloadedBanks;
     
@@ -754,12 +725,12 @@ void BankGroupLoadBalancer::generateTaskMigrations() {
     }
     avgLoad /= activeBankList.size();
     
-    // 分类过载和欠载Bank
+    // Classify overloaded and underloaded banks
     for (uint32_t bankId : activeBankList) {
         float bankLoad = calculateBankGroupLoad(bankToGroup[bankId]);
-        if (bankLoad > avgLoad * 1.2f) { // 过载阈值：平均负载的1.2倍
+        if (bankLoad > avgLoad * 1.2f) { // Overload threshold: 1.2x average load
             overloadedBanks.push_back(bankId);
-        } else if (bankLoad < avgLoad * 0.8f) { // 欠载阈值：平均负载的0.8倍
+        } else if (bankLoad < avgLoad * 0.8f) { // Underload threshold: 0.8x average load
             underloadedBanks.push_back(bankId);
         }
     }
@@ -767,7 +738,7 @@ void BankGroupLoadBalancer::generateTaskMigrations() {
     info("Task migration analysis: avg_load=%.2f, overloaded=%zu, underloaded=%zu",
          avgLoad, overloadedBanks.size(), underloadedBanks.size());
     
-    // 生成任务迁移策略
+    // Generate task migration strategy
     for (uint32_t overloadedBank : overloadedBanks) {
         if (underloadedBanks.empty()) break;
         
@@ -775,25 +746,25 @@ void BankGroupLoadBalancer::generateTaskMigrations() {
         uint32_t targetLoad = static_cast<uint32_t>(avgLoad);
         
         if (currentLoad > targetLoad) {
-            uint32_t tasksToMigrate = (currentLoad - targetLoad) / 2; // 迁移一半的超载任务
+            uint32_t tasksToMigrate = (currentLoad - targetLoad) / 2; // Migrate half of the excess tasks
             
-            // 选择最轻的目标Bank
+            // Select the lightest target bank
             uint32_t targetBank = *std::min_element(underloadedBanks.begin(), underloadedBanks.end(),
                 [this](uint32_t a, uint32_t b) {
                     return this->bankQueueLengths[a] < this->bankQueueLengths[b];
                 });
             
-            // 添加任务迁移命令
+            // Add task migration command
             bankGroupCommands[overloadedBank].addTaskMigration(overloadedBank, targetBank, tasksToMigrate);
             
             info("Generated task migration: %u tasks from bank %u to bank %u",
                  tasksToMigrate, overloadedBank, targetBank);
             
-            // 更新负载计数（模拟迁移效果）
+            // Update load counters (simulate migration effect)
             bankQueueLengths[overloadedBank] -= tasksToMigrate;
             bankQueueLengths[targetBank] += tasksToMigrate;
             
-            // 如果目标Bank负载过高，从欠载列表中移除
+            // If the target bank is no longer underloaded, remove it from the underloaded list
             if (bankQueueLengths[targetBank] >= avgLoad) {
                 underloadedBanks.erase(
                     std::remove(underloadedBanks.begin(), underloadedBanks.end(), targetBank),
@@ -810,7 +781,7 @@ void BankGroupLoadBalancer::executeTaskMigrations() {
     
     size_t totalMigrations = 0;
     
-    // 遍历所有Bank的任务迁移命令
+    // Traverse all banks' task migration commands
     for (uint32_t bankId : activeBankList) {
         const auto& command = bankGroupCommands[bankId];
         const auto& taskMigrations = command.getTaskMigrations();
@@ -833,7 +804,7 @@ void BankGroupLoadBalancer::executeTaskMigrations() {
 void BankGroupLoadBalancer::migrateTasksBetweenBanks(uint32_t sourceBankId, uint32_t targetBankId, uint32_t taskCount) {
     info("Migrating %u tasks from bank %u to bank %u", taskCount, sourceBankId, targetBankId);
     
-    // 选择要迁移的任务
+    // Select tasks to migrate
     std::vector<Address> tasksToMigrate = selectTasksForMigration(sourceBankId, taskCount);
     
     if (tasksToMigrate.empty()) {
@@ -841,16 +812,11 @@ void BankGroupLoadBalancer::migrateTasksBetweenBanks(uint32_t sourceBankId, uint
         return;
     }
     
-    // 更新本地任务计数
+    // Update local task counters
     if (localDataTaskCount[sourceBankId] >= tasksToMigrate.size()) {
         localDataTaskCount[sourceBankId] -= tasksToMigrate.size();
     }
     localDataTaskCount[targetBankId] += tasksToMigrate.size();
-    
-    // 生成地址重映射
-    for (Address addr : tasksToMigrate) {
-        bankGroupCommands[sourceBankId].addDataReassignment(addr, targetBankId);
-    }
     
     info("Task migration completed: %zu tasks migrated from bank %u to bank %u",
          tasksToMigrate.size(), sourceBankId, targetBankId);
@@ -859,10 +825,10 @@ void BankGroupLoadBalancer::migrateTasksBetweenBanks(uint32_t sourceBankId, uint
 std::vector<Address> BankGroupLoadBalancer::selectTasksForMigration(uint32_t sourceBankId, uint32_t taskCount) {
     std::vector<Address> selectedTasks;
     
-    // 简化实现：选择前taskCount个任务
-    // 实际实现中应该根据任务优先级、数据局部性等因素选择
+    // Simplified implementation: select the first taskCount tasks
+    // In practice, selection should consider task priority, data locality, etc.
     for (uint32_t i = 0; i < taskCount && selectedTasks.size() < taskCount; i++) {
-        Address taskAddr = static_cast<Address>(sourceBankId * 1000 + i); // 简化的地址生成
+        Address taskAddr = static_cast<Address>(sourceBankId * 1000 + i); // Simplified address generation
         selectedTasks.push_back(taskAddr);
     }
     
@@ -870,29 +836,28 @@ std::vector<Address> BankGroupLoadBalancer::selectTasksForMigration(uint32_t sou
     return selectedTasks;
 }
 
-// ===== Phase 4: 验证和调试支持 =====
+// ===== Phase 4: Validation and Debug Support =====
 
 void BankGroupLoadBalancer::initializeConfigParameters(Config& config) {
-    // 负载均衡阈值参数
+    // Load balancing threshold parameters
     loadImbalanceThreshold = config.get<double>("sys.pimBridge.bankGroup.loadImbalanceThreshold", 1.2);
     taskMigrationThreshold = config.get<double>("sys.pimBridge.bankGroup.taskMigrationThreshold", 1.5);
     
-    // 任务迁移参数
+    // Task migration parameters
     minTasksForMigration = config.get<uint32_t>("sys.pimBridge.bankGroup.minTasksForMigration", 5);
     maxTasksPerMigration = config.get<uint32_t>("sys.pimBridge.bankGroup.maxTasksPerMigration", 50);
     
-    // 功能开关
+    // Feature switches
     enableTaskMigration = config.get<bool>("sys.pimBridge.bankGroup.enableTaskMigration", true);
     enableStorageBankReassignment = config.get<bool>("sys.pimBridge.bankGroup.enableStorageBankReassignment", true);
     
-    // 架构参数
+    // Architecture parameters
     storageToComputeRatio = config.get<uint32_t>("sys.pimBridge.bankGroup.storageToComputeRatio", 4);
     
-    // 初始化统计信息
+    // Initialize statistics
     totalLoadBalanceOperations = 0;
     totalTaskMigrations = 0;
     totalStorageBankReassignments = 0;
-    totalDataReassignments = 0;
     
     info("BankGroup configuration: loadThreshold=%.2f, taskThreshold=%.2f, storageRatio=%u",
          loadImbalanceThreshold, taskMigrationThreshold, storageToComputeRatio);
@@ -901,7 +866,7 @@ void BankGroupLoadBalancer::initializeConfigParameters(Config& config) {
 void BankGroupLoadBalancer::validateBankGroupConfiguration() {
     info("=== Bank Group Configuration Validation ===");
     
-    // 验证Bank类型配置
+    // Validate bank type configuration
     uint32_t activeBankCount = 0;
     uint32_t storageBankCount = 0;
     
@@ -913,7 +878,7 @@ void BankGroupLoadBalancer::validateBankGroupConfiguration() {
     info("Bank Types: total=%u, active=%u, storage=%u", 
          totalBanks, activeBankCount, storageBankCount);
     
-    // 验证Bank Group映射
+    // Validate bank group mappings
     info("Bank Group Mappings:");
     for (uint32_t groupId = 0; groupId < numGroups; groupId++) {
         uint32_t activeBankId = findActiveBankInGroup(groupId);
@@ -922,7 +887,7 @@ void BankGroupLoadBalancer::validateBankGroupConfiguration() {
         info("  Group %u: active_bank=%u, total_banks=%zu", 
              groupId, activeBankId, groupBanks.size());
         
-        // 验证Group内Bank的一致性
+        // Validate consistency of banks within the group
         for (uint32_t bankId : groupBanks) {
             if (bankToGroup[bankId] != groupId) {
                 info("WARNING: Bank %u mapping inconsistency: points to group %u but in group %u",
@@ -931,7 +896,7 @@ void BankGroupLoadBalancer::validateBankGroupConfiguration() {
         }
     }
     
-    // 验证存储Bank与计算Bank的比例
+    // Validate storage-to-compute bank ratio
     float actualRatio = storageBankCount > 0 ? (float)storageBankCount / activeBankCount : 0.0f;
     info("Storage-to-Compute Ratio: configured=%u, actual=%.2f", 
          storageToComputeRatio, actualRatio);
@@ -944,12 +909,12 @@ void BankGroupLoadBalancer::validateBankGroupConfiguration() {
 void BankGroupLoadBalancer::printLoadBalancingStatistics() {
     info("=== Bank Group Load Balancing Statistics ===");
     
-    // 总体统计
+    // Overall statistics
     info("Operations: total=%u, migrations=%u, reassignments=%u, data_ops=%u",
          totalLoadBalanceOperations, totalTaskMigrations, 
-         totalStorageBankReassignments, totalDataReassignments);
+         totalStorageBankReassignments);
     
-    // 每个Group的负载统计
+    // Load statistics for each group
     info("Group Load Distribution:");
     float totalLoad = 0.0f;
     for (uint32_t groupId = 0; groupId < numGroups; groupId++) {
@@ -966,7 +931,7 @@ void BankGroupLoadBalancer::printLoadBalancingStatistics() {
     float avgLoad = numGroups > 0 ? totalLoad / numGroups : 0.0f;
     info("Average Group Load: %.2f", avgLoad);
     
-    // 负载均衡效果分析
+    // Load balancing effect analysis
     float maxLoad = 0.0f;
     float minLoad = std::numeric_limits<float>::max();
     for (uint32_t groupId = 0; groupId < numGroups; groupId++) {
@@ -1016,7 +981,7 @@ void BankGroupLoadBalancer::validateTaskCounts() {
     uint32_t totalManagedTasks = 0;
     uint32_t totalStorageTasks = 0;
     
-    // 统计所有任务
+    // Count all tasks
     for (uint32_t bankId : activeBankList) {
         if (bankId < localDataTaskCount.size()) {
             totalLocalTasks += localDataTaskCount[bankId];
@@ -1038,13 +1003,13 @@ void BankGroupLoadBalancer::validateTaskCounts() {
     info("Task Distribution: local=%u, managed=%u, storage=%u",
          totalLocalTasks, totalManagedTasks, totalStorageTasks);
     
-    // 验证托管任务与存储任务的一致性
+    // Validate consistency between managed tasks and storage tasks
     if (totalManagedTasks != totalStorageTasks) {
         info("WARNING: Task count inconsistency - managed tasks (%u) != storage tasks (%u)",
              totalManagedTasks, totalStorageTasks);
     }
     
-    // 验证每个Bank的任务计数
+    // Validate task counts for each bank
     for (uint32_t bankId : activeBankList) {
         float groupLoad = calculateBankGroupLoad(bankToGroup[bankId]);
         uint32_t queueLength = bankId < bankQueueLengths.size() ? bankQueueLengths[bankId] : 0;
@@ -1057,3 +1022,4 @@ void BankGroupLoadBalancer::validateTaskCounts() {
 }
 
 } // namespace pimbridge
+

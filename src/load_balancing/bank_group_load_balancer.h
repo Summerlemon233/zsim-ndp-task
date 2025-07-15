@@ -31,7 +31,6 @@ struct TaskMigration {
 // 新的Bank Group重分配命令，用于数据接管机制
 class BankGroupCommand {
 private:
-    std::unordered_map<Address, uint32_t> dataReassignments; // 地址 -> 新负责Bank
     std::vector<uint32_t> groupReassignments; // Bank -> 新的Group ID
     std::vector<StorageBankReassignment> storageBankReassignments; // 存储Bank重分配列表
     std::vector<TaskMigration> taskMigrations; // 任务迁移列表
@@ -39,15 +38,9 @@ private:
 public:
     BankGroupCommand() {}
     void reset() { 
-        dataReassignments.clear(); 
         groupReassignments.clear();
         storageBankReassignments.clear();
         taskMigrations.clear();
-    }
-    
-    // 添加数据重分配命令
-    void addDataReassignment(Address addr, uint32_t newBankId) {
-        dataReassignments[addr] = newBankId;
     }
     
     // 添加Bank Group重分配命令
@@ -61,10 +54,6 @@ public:
     // 添加存储Bank重分配命令
     void addStorageBankReassignment(const StorageBankReassignment& reassignment) {
         storageBankReassignments.push_back(reassignment);
-    }
-    
-    const std::unordered_map<Address, uint32_t>& getDataReassignments() const {
-        return dataReassignments;
     }
     
     const std::vector<uint32_t>& getGroupReassignments() const {
@@ -85,15 +74,14 @@ public:
     }
     
     bool empty() const { 
-        return dataReassignments.empty() && groupReassignments.empty() && 
+        return groupReassignments.empty() && 
                storageBankReassignments.empty() && taskMigrations.empty(); 
     }
     
     std::string output() {
         if (empty()) return "None";
         std::stringstream ss;
-        ss << "DataReassignments: " << dataReassignments.size() 
-           << ", GroupReassignments: " << groupReassignments.size()
+        ss << "GroupReassignments: " << groupReassignments.size()
            << ", StorageBankReassignments: " << storageBankReassignments.size()
            << ", TaskMigrations: " << taskMigrations.size();
         return ss.str();
@@ -114,7 +102,6 @@ public:
                            const std::vector<bool>& storageFlags);
     void initializeBankGroups(uint32_t groupCount);
     void updateBankLoads(const std::vector<uint32_t>& queueLengths);
-    void updateDataOwnership(Address addr, uint32_t bankId);
     
     // 新增：任务分类统计和负载计算
     void updateBankTaskClassification(const std::vector<uint32_t>& queueLengths);
@@ -148,7 +135,6 @@ public:
     // Bank Group重分配核心算法
     bool detectLoadImbalance();
     void generateGroupReassignments();
-    void generateDataReassignments();
     void optimizeBankGroupMapping();
     
     // 存储Bank重分配核心算法
@@ -195,8 +181,6 @@ private:
     uint32_t totalLoadBalanceOperations;
     uint32_t totalTaskMigrations;
     uint32_t totalStorageBankReassignments;
-    uint32_t totalDataReassignments;
-    
     // 架构状态
     uint32_t totalBanks;                 // 总Bank数量
     uint32_t numGroups;                  // Bank Group数量
@@ -220,10 +204,6 @@ private:
     std::vector<uint32_t> bankQueueLengths;  // 各Bank队列长度
     std::vector<double> bankLoadFactors;     // 各Bank负载因子
     double avgLoadFactor;                    // 平均负载因子
-    
-    // 数据管辖权映射
-    std::unordered_map<Address, uint32_t> dataOwnership; // 地址 -> 负责Bank
-    std::unordered_map<uint32_t, std::unordered_set<Address>> bankOwnedData; // Bank -> 管辖数据集
     
     // 命令缓存
     std::vector<BankGroupCommand> bankGroupCommands;

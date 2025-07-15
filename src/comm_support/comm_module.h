@@ -234,7 +234,6 @@ public:
     // Bank Group负载均衡新接口
     void executeBankGroupLoadBalance(const BankGroupCommand& command, uint32_t sourceBankId);
     void updateBankGroupMapping(const std::vector<uint32_t>& newGroupAssignments);
-    void handleDataReassignment(Address addr, uint32_t newOwnerBank);
     std::vector<uint32_t> getBankQueueLengths();
     void updateBankTypes(const std::vector<bool>& activeFlags, const std::vector<bool>& storageFlags);
     
@@ -244,9 +243,6 @@ public:
     
     // 存储Bank重分配接口
     void executeStorageBankReassignment(const StorageBankReassignment& reassignment);
-    
-    // 地址重映射接口
-    void executeAddressRemapping(const std::pair<uint64_t, uint64_t>& remapping);
     
     // 任务迁移接口
     void executeTaskMigration(const TaskMigration& migration);
