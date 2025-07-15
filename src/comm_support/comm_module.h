@@ -21,8 +21,16 @@ using namespace task_support;
 
 namespace pimbridge {
 
-// 前向声明
+// Forward declaration
 class BankGroupCommand;
+
+// Task classification information structure
+struct TaskClassification {
+    uint32_t localDataTasks;
+    std::unordered_map<uint32_t, uint32_t> managedDataTasks;
+    
+    TaskClassification() : localDataTasks(0) {}
+};
 
 class CommModuleBase {
 protected:
@@ -187,6 +195,11 @@ private:
     uint64_t lastGatherPhase;
     uint64_t lastScatterPhase;
 
+    // 负载均衡频率控制
+    uint64_t loadBalancePhaseCounter;
+    uint64_t loadBalancePhaseInterval;
+    uint64_t lastLoadBalancePhase;
+
     // packet buffer
     std::vector<CommPacketQueue> scatterBuffer;
 
@@ -224,6 +237,19 @@ public:
     void handleDataReassignment(Address addr, uint32_t newOwnerBank);
     std::vector<uint32_t> getBankQueueLengths();
     void updateBankTypes(const std::vector<bool>& activeFlags, const std::vector<bool>& storageFlags);
+    
+    // 任务分类接口
+    TaskClassification getTaskClassification(uint32_t activeBankId);
+    std::vector<Address> getStorageBankAddresses(uint32_t storageBankId);
+    
+    // 存储Bank重分配接口
+    void executeStorageBankReassignment(const StorageBankReassignment& reassignment);
+    
+    // 地址重映射接口
+    void executeAddressRemapping(const std::pair<uint64_t, uint64_t>& remapping);
+    
+    // 任务迁移接口
+    void executeTaskMigration(const TaskMigration& migration);
         
     bool isEmpty(uint64_t ts = 0) override;
     

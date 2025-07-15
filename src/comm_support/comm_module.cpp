@@ -89,20 +89,63 @@ void CommModule::commandLoadBalance(bool* needParentLevelLb) {
     }
     DEBUG_LB_O("module %s begin command lb", this->getName());
     
-    // 检查是否使用新的Bank Group负载均衡器
+    // Check if the new Bank Group load balancer is used
     BankGroupLoadBalancer* bankGroupLB = dynamic_cast<BankGroupLoadBalancer*>(this->loadBalancer);
     if (bankGroupLB != nullptr) {
-        // 更新Bank负载信息
+        // Initialize bank type information (only initialize on first call)
+        static bool bankGroupInitialized = false;
+        if (!bankGroupInitialized) {
+            uint32_t numBanks = bankEndId - bankBeginId;
+            if (numBanks > 0) {
+                // Generate bank types according to configuration
+                uint32_t activeRatio = zinfo->activeNodeRatio;
+                uint32_t storageRatio = zinfo->storageNodeRatio;
+                
+                info("CommandLoadBalance: numBanks=%u, activeRatio=%u, storageRatio=%u", 
+                     numBanks, activeRatio, storageRatio);
+                
+                // Generate bank type flags
+                std::vector<bool> activeFlags(numBanks, false);
+                std::vector<bool> storageFlags(numBanks, false);
+                
+                uint32_t totalRatio = activeRatio + storageRatio;
+                if (totalRatio > 0) {
+                    // Assign bank types according to ratio
+                    for (uint32_t i = 0; i < numBanks; i++) {
+                        uint32_t position = i % totalRatio;
+                        if (position < activeRatio) {
+                            activeFlags[i] = true;
+                        } else {
+                            storageFlags[i] = true;
+                        }
+                    }
+                } else {
+                    warn("totalRatio is 0, all banks will be inactive");
+                }
+                
+                // Initialize bank types
+                bankGroupLB->initializeBankTypes(activeFlags, storageFlags);
+                
+                // Initialize bank groups
+                uint32_t numGroups = (numBanks + totalRatio - 1) / totalRatio; // round up
+                bankGroupLB->initializeBankGroups(numGroups);
+                
+                bankGroupInitialized = true;
+            }
+        }
+        
+        // Update bank load information
         std::vector<uint32_t> queueLengths = getBankQueueLengths();
         bankGroupLB->updateBankLoads(queueLengths);
         
-        // 生成Bank Group重分配命令
+        // Generate bank group reassignment command
         bankGroupLB->generateCommand(needParentLevelLb);
         
-        // 执行Bank Group重分配
+        // Execute bank group reassignment
         std::vector<DataHotness> outInfo;
         for (uint32_t i = this->bankBeginId; i < bankEndId; ++i) {
-            const BankGroupCommand& cmd = bankGroupLB->getBankGroupCommand(i-bankBeginId);
+            uint32_t bankIndex = i - bankBeginId;
+            const BankGroupCommand& cmd = bankGroupLB->getBankGroupCommand(bankIndex);
             if (!cmd.empty()) {
                 uint32_t childCommId = zinfo->commMapping->getCommId(level-1, i);
                 zinfo->commModules[level-1][childCommId]->executeBankGroupLoadBalance(cmd, i);
@@ -111,7 +154,7 @@ void CommModule::commandLoadBalance(bool* needParentLevelLb) {
         
         bankGroupLB->assignLbTarget(outInfo);
     } else {
-        // 使用传统的负载均衡机制
+        // Use traditional load balancing mechanism
         this->loadBalancer->generateCommand(needParentLevelLb);
         std::vector<DataHotness> outInfo;
         outInfo.clear();
@@ -299,7 +342,17 @@ bool CommModule::shouldCommandLoadBalance() {
     if (!this->enableLoadBalance) {
         return false;
     }
-    return true;
+    
+    // 添加频率控制：每N个phase执行一次负载均衡
+    static uint32_t lbPhaseInterval = 5; // 每5个phase执行一次负载均衡
+    static uint32_t lastLbPhase = 0;
+    
+    if (zinfo->numPhases - lastLbPhase >= lbPhaseInterval) {
+        lastLbPhase = zinfo->numPhases;
+        return true;
+    }
+    
+    return false;
 }
 
 void CommModule::initStats(AggregateStat* parentStat) {
@@ -361,8 +414,20 @@ void CommModule::executeBankGroupLoadBalance(const BankGroupCommand& command, ui
         updateBankGroupMapping(groupReassignments);
     }
     
-    DEBUG_LB_O("Bank group load balance executed: %zu data reassignments, %zu group reassignments",
-              dataReassignments.size(), groupReassignments.size());
+    // 处理存储Bank重分配命令
+    const auto& storageBankReassignments = command.getStorageBankReassignments();
+    for (const auto& reassignment : storageBankReassignments) {
+        executeStorageBankReassignment(reassignment);
+    }
+    
+    // 处理任务迁移命令
+    const auto& taskMigrations = command.getTaskMigrations();
+    for (const auto& migration : taskMigrations) {
+        executeTaskMigration(migration);
+    }
+    
+    DEBUG_LB_O("Bank group load balance executed: %zu data reassignments, %zu group reassignments, %zu storage bank reassignments, %zu task migrations",
+              dataReassignments.size(), groupReassignments.size(), storageBankReassignments.size(), taskMigrations.size());
 }
 
 void CommModule::updateBankGroupMapping(const std::vector<uint32_t>& newGroupAssignments) {
@@ -403,4 +468,114 @@ void CommModule::updateBankTypes(const std::vector<bool>& activeFlags, const std
     if (bankGroupLB != nullptr) {
         bankGroupLB->initializeBankTypes(activeFlags, storageFlags);
     }
+}
+
+TaskClassification CommModule::getTaskClassification(uint32_t activeBankId) {
+    TaskClassification classification;
+    
+    // 简化实现：根据bankQueueLength估算任务分类
+    uint32_t totalTasks = static_cast<uint32_t>(bankQueueLength[activeBankId - bankBeginId]);
+    
+    // 临时实现：假设30%为本地数据任务，70%为托管任务
+    classification.localDataTasks = totalTasks * 3 / 10;
+    
+    // 将剩余任务分配给存储Bank（这里需要更精确的实现）
+    // 暂时简化为单个存储Bank托管所有任务
+    uint32_t managedTasks = totalTasks - classification.localDataTasks;
+    if (managedTasks > 0) {
+        // 找到第一个可能的存储Bank ID（简化实现）
+        uint32_t storageBankId = activeBankId + 1;
+        classification.managedDataTasks[storageBankId] = managedTasks;
+    }
+    
+    return classification;
+}
+
+std::vector<Address> CommModule::getStorageBankAddresses(uint32_t storageBankId) {
+    std::vector<Address> addresses;
+    
+    // 简化实现：返回空向量
+    // 实际实现需要从地址映射表中查找该存储Bank管理的地址
+    
+    return addresses;
+}
+
+void CommModule::executeStorageBankReassignment(const StorageBankReassignment& reassignment) {
+    info("Executing storage bank reassignment: bank %u from group %u to group %u (%u tasks)",
+         reassignment.storageBankId, reassignment.sourceGroupId, 
+         reassignment.targetGroupId, reassignment.taskCount);
+    
+    // 更新地址重映射表
+    // 将原本指向源Group计算Bank的地址重新指向目标Group计算Bank
+    
+    // 获取源和目标Group的计算Bank
+    uint32_t sourceActiveBank = 0;
+    uint32_t targetActiveBank = 0;
+    
+    // 这里需要从负载均衡器获取Group信息
+    // 简化实现：假设Group ID就是计算Bank ID
+    sourceActiveBank = reassignment.sourceGroupId;
+    targetActiveBank = reassignment.targetGroupId;
+    
+    // 更新地址重映射
+    if (this->addrRemapTable) {
+        // 获取该存储Bank管理的地址（简化实现）
+        std::vector<Address> addresses = getStorageBankAddresses(reassignment.storageBankId);
+        
+        for (Address addr : addresses) {
+            // 将地址重映射到新的计算Bank
+            this->addrRemapTable->setChildRemap(addr, targetActiveBank);
+        }
+    }
+    
+    info("Storage bank reassignment completed: bank %u now handled by active bank %u",
+         reassignment.storageBankId, targetActiveBank);
+}
+
+void CommModule::executeAddressRemapping(const std::pair<uint64_t, uint64_t>& remapping) {
+    // 执行地址重映射
+    uint64_t oldAddress = remapping.first;
+    uint64_t newAddress = remapping.second;
+    
+    // 通过地址重映射表更新地址映射
+    if (this->addrRemapTable) {
+        // 提取Bank ID（简化实现）
+        uint32_t newBankId = static_cast<uint32_t>(newAddress & 0xFFFF);
+        Address addr = static_cast<Address>(oldAddress);
+        
+        this->addrRemapTable->setChildRemap(addr, newBankId);
+    }
+    
+    info("Address remapping executed: 0x%lx -> 0x%lx", oldAddress, newAddress);
+}
+
+void CommModule::executeTaskMigration(const TaskMigration& migration) {
+    // 执行任务迁移
+    uint32_t sourceBankId = migration.sourceBankId;
+    uint32_t targetBankId = migration.targetBankId;
+    uint32_t taskCount = migration.taskCount;
+    
+    info("Executing task migration: %u tasks from bank %u to bank %u",
+         taskCount, sourceBankId, targetBankId);
+    
+    // 更新任务单元的任务队列
+    if (sourceBankId < zinfo->taskUnits.size() && targetBankId < zinfo->taskUnits.size()) {
+        auto* sourceTaskUnit = zinfo->taskUnits[sourceBankId];
+        auto* targetTaskUnit = zinfo->taskUnits[targetBankId];
+        
+        if (sourceTaskUnit && targetTaskUnit) {
+            // 简化实现：通过地址重映射实现任务迁移
+            for (Address addr : migration.dataAddresses) {
+                if (this->addrRemapTable) {
+                    this->addrRemapTable->setChildRemap(addr, targetBankId);
+                }
+            }
+            
+            info("Task migration completed: %u tasks migrated from bank %u to bank %u",
+                 taskCount, sourceBankId, targetBankId);
+        }
+    }
+    
+    info("Task migration executed: %u tasks from bank %u to bank %u",
+         taskCount, sourceBankId, targetBankId);
 }
