@@ -190,86 +190,66 @@ PimBridgeTaskUnit::PimBridgeTaskUnit(const std::string& _name, uint32_t _tuId,
 void PimBridgeTaskUnit::assignNewTask(TaskPtr t, Hint* hint) {
     //info("Assigning new Tasks");
     assert(hint->dataPtr != 0);
+    
+    uint32_t nodeId;
+    
+    // Unified logic for both first-round and non-first-round tasks
+    if (hint->location >= 0) {
+        // Explicit location specified - validate and potentially auto-route
+        assert_msg((uint32_t)hint->location < zinfo->numCores, 
+            "Invalid NUMA node ID %d specified in hint. Must be less than numCores (%u)", 
+            hint->location, zinfo->numCores);
+        
+        if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
+            if (zinfo->isActiveNode[hint->location]) {
+                // Specified location is an active node, use it directly
+                nodeId = hint->location;
+            } else {
+                // Specified location is a storage node, auto-route to responsible active node
+                nodeId = zinfo->storageToActiveMap[hint->location];
+                info("Auto-routing: task specified for storage node %d, routed to responsible active node %d", 
+                     hint->location, nodeId);
+            }
+        } else {
+            // Fallback: use specified location as-is if compute relocation is disabled
+            nodeId = hint->location;
+        }
+    } else {
+        // No explicit location (hint->location == -1) - use computation relocation strategy
+        uint32_t dataNodeId = zinfo->numaMap->getNodeOfPage(zinfo->numaMap->getPageAddress(hint->dataPtr));
+        
+        if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
+            if (zinfo->isActiveNode[dataNodeId]) {
+                // Data is on an active node, execute there
+                nodeId = dataNodeId;
+            } else {
+                // Data is on a storage node, route to responsible active node
+                nodeId = zinfo->storageToActiveMap[dataNodeId];
+                info("Computation relocation: data at storage node %d, task routed to active node %d", 
+                     dataNodeId, nodeId);
+            }
+        } else {
+            // Fallback to original behavior if compute relocation is disabled
+            nodeId = dataNodeId;
+        }
+    }
+    
+    // Final validation: ensure target node is active (if compute relocation is enabled)
+    if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
+        assert_msg(zinfo->isActiveNode[nodeId], 
+            "Task must be executed on active node. Node %d is not active.", nodeId);
+    }
+    
+    // Enqueue task to the determined node
     if (hint->firstRound) {
         assert(t->timeStamp == 1);
-        uint32_t nodeId;
-        
-        // Use hint->location (if specified) or select node based on data location
-        if (hint->location >= 0) {
-            // Check if the specified location is valid and is an active node
-            assert_msg((uint32_t)hint->location < zinfo->numCores, 
-                "Invalid NUMA node ID %d specified in hint. Must be less than numCores (%u)", 
-                hint->location, zinfo->numCores);
-            
-            // Ensure task is assigned to active node only
-            if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
-                assert_msg(zinfo->isActiveNode[hint->location], 
-                    "Task cannot be assigned to storage node %d. Only active nodes can execute tasks.", 
-                    hint->location);
-            }
-            nodeId = hint->location;
-
-        } else {
-            // Implement computation relocation: route task based on data location
-            uint32_t dataNodeId = zinfo->numaMap->getNodeOfPage(zinfo->numaMap->getPageAddress(hint->dataPtr));
-            
-            if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
-                if (zinfo->isActiveNode[dataNodeId]) {
-                    // Data is on an active node, execute there
-                    nodeId = dataNodeId;
-                } else {
-                    // Data is on a storage node, route to responsible active node
-                    nodeId = zinfo->storageToActiveMap[dataNodeId];
-                    info("Computation relocation: data at storage node %d, task routed to active node %d", 
-                         dataNodeId, nodeId);
-                }
-            } else {
-                // Fallback to original behavior if compute relocation is disabled
-                nodeId = dataNodeId;
-            }
-        }
-        
-        // Final validation: ensure target node is active (if compute relocation is enabled)
-        if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
-            assert_msg(zinfo->isActiveNode[nodeId], 
-                "Task must be executed on active node. Node %d is not active.", nodeId);
-        }
-        
-        // info("This is the first round. Task unit will enqueue this task to the NUMA node %d",nodeId);
-        zinfo->taskUnits[nodeId]->taskEnqueue(t, 0);
+        // info("First round: Task enqueued to node %d", nodeId);
     } else {
-        // For non-first rounds, consider using the specified location
-        if (hint->location >= 0) {
-            // Check if the specified location is valid and is an active node
-            assert_msg((uint32_t)hint->location < zinfo->numCores, 
-                "Invalid NUMA node ID %d specified in hint. Must be less than numCores (%u)", 
-                hint->location, zinfo->numCores);
-            
-            // Ensure task is assigned to active node only
-            if (zinfo->TASK_BASED && zinfo->enableComputeRelocation) {
-                assert_msg(zinfo->isActiveNode[hint->location], 
-                    "Task cannot be assigned to storage node %d. Only active nodes can execute tasks.", 
-                    hint->location);
-            }
-            
-            // info("Non-first round. Task will be enqueued to the nodeId %d", hint->location);
-            zinfo->taskUnits[hint->location]->taskEnqueue(t, 0);
-        } else {
-            // Continue using the original data availability check strategy
-            // But enhance it with node type awareness
-
-            int avail = commModule->checkAvailable(zinfo->numaMap->getLbPageAddress(hint->dataPtr));
-            if (avail >= 0) {
-                zinfo->taskUnits[taskUnitId]->taskEnqueue(t, 0);
-                // info("Non-first round & location == -1. Task will be enqueued to the nodeId %d", taskUnitId);
-            } else {
-                  // info("checkAvailable is not true. Gather-Scatter Needed!");
-                CommPacket* p = new TaskCommPacket(t->timeStamp, t->readyCycle, 0, this->taskUnitId, 1, -1, t);
-                this->commModule->handleOutPacket(p);
-            }
-        }
         this->commModule->s_GenTasks.atomicInc(1);
+        // info("Non-first round: Task enqueued to node %d", nodeId);
     }
+    
+    zinfo->taskUnits[nodeId]->taskEnqueue(t, 0);
 }
 
 void PimBridgeTaskUnit::newAddrBorrow(Address lbPageAddr) {

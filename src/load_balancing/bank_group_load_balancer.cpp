@@ -161,10 +161,18 @@ void BankGroupLoadBalancer::updateBankTaskClassification(const std::vector<uint3
     }
     
     // Basic validation: ensure the sum of classified tasks equals the total number of tasks
+    uint32_t totalLocalTasks = 0;
+    uint32_t totalManagedTasks = 0;
+    
     for (uint32_t activeBankId : activeBankList) {
         uint32_t totalClassified = localDataTaskCount[activeBankId];
         for (const auto& managed : managedDataTaskCount[activeBankId]) {
             totalClassified += managed.second;
+        }
+        
+        totalLocalTasks += localDataTaskCount[activeBankId];
+        for (const auto& managed : managedDataTaskCount[activeBankId]) {
+            totalManagedTasks += managed.second;
         }
         
         if (totalClassified != queueLengths[activeBankId]) {
@@ -172,6 +180,9 @@ void BankGroupLoadBalancer::updateBankTaskClassification(const std::vector<uint3
                  activeBankId, queueLengths[activeBankId], totalClassified);
         }
     }
+    
+    info("Task classification summary - Local data tasks: %u, Managed data tasks: %u", 
+         totalLocalTasks, totalManagedTasks);
 }
 
 double BankGroupLoadBalancer::calculateLoadFactor(uint32_t bankId) {
@@ -189,15 +200,9 @@ double BankGroupLoadBalancer::calculateGroupLoad(uint32_t groupId) {
     const auto& groupBanks = groupToBanks[groupId];
     
     // Find the compute bank in the group
-    uint32_t activeBankId = 0;
-    for (uint32_t bankId : groupBanks) {
-        if (isActiveBank[bankId]) {
-            activeBankId = bankId;
-            break;
-        }
-    }
+    uint32_t activeBankId = findActiveBankInGroup(groupId);
     
-    if (activeBankId == 0) {
+    if (activeBankId == UINT32_MAX) {
         warn("Bank Group %u has no active bank", groupId);
         return 0.0;
     }
@@ -207,7 +212,7 @@ double BankGroupLoadBalancer::calculateGroupLoad(uint32_t groupId) {
     
     // Add up all storage bank data tasks in the group
     for (uint32_t bankId : groupBanks) {
-        if (isStorageBank[bankId]) {
+        if (bankId < isStorageBank.size() && isStorageBank[bankId]) {
             groupLoad += storageDataTaskCount[bankId];
         }
     }
@@ -243,7 +248,7 @@ void BankGroupLoadBalancer::validateTaskAccounting() {
     // Basic validation: the number of tasks in each bank group = its compute bank's queue length
     for (uint32_t groupId = 0; groupId < numGroups; groupId++) {
         uint32_t activeBankId = findActiveBankInGroup(groupId);
-        if (activeBankId == 0) continue;
+        if (activeBankId == UINT32_MAX) continue;
         
         double calculatedGroupLoad = calculateGroupLoad(groupId);
         uint32_t actualQueueLength = bankQueueLengths[activeBankId];
@@ -256,22 +261,27 @@ void BankGroupLoadBalancer::validateTaskAccounting() {
 }
 
 uint32_t BankGroupLoadBalancer::findActiveBankInGroup(uint32_t groupId) const {
-    if (groupId >= numGroups) return 0;
+    if (groupId >= numGroups) {
+        warn("Invalid group ID: %u (max: %u)", groupId, numGroups - 1);
+        return UINT32_MAX;
+    }
     
     const auto& groupBanks = groupToBanks[groupId];
     for (uint32_t bankId : groupBanks) {
-        if (isActiveBank[bankId]) {
+        if (bankId < isActiveBank.size() && isActiveBank[bankId]) {
             return bankId;
         }
     }
-    return 0;
+    
+    warn("No active bank found in group %u", groupId);
+    return UINT32_MAX;
 }
 
 float BankGroupLoadBalancer::calculateBankGroupLoad(uint32_t groupId) const {
     if (groupId >= numGroups) return 0.0f;
     
     uint32_t activeBankId = findActiveBankInGroup(groupId);
-    if (activeBankId == 0) return 0.0f;
+    if (activeBankId == UINT32_MAX) return 0.0f;
     
     // Calculate group load = compute bank local tasks + all managed storage bank tasks
     float totalLoad = static_cast<float>(localDataTaskCount[activeBankId]);
@@ -316,14 +326,14 @@ std::vector<uint32_t> BankGroupLoadBalancer::selectUnderloadedGroups() {
 }
 
 uint32_t BankGroupLoadBalancer::selectHeaviestStorageBank(uint32_t groupId) {
-    if (groupId >= numGroups) return 0;
+    if (groupId >= numGroups) return UINT32_MAX;
     
     const auto& groupBanks = groupToBanks[groupId];
-    uint32_t heaviestBank = 0;
+    uint32_t heaviestBank = UINT32_MAX;
     uint32_t maxTasks = 0;
     
     for (uint32_t bankId : groupBanks) {
-        if (isStorageBank[bankId]) {
+        if (bankId < isStorageBank.size() && isStorageBank[bankId]) {
             uint32_t taskCount = storageDataTaskCount[bankId];
             if (taskCount > maxTasks) {
                 maxTasks = taskCount;
@@ -336,7 +346,7 @@ uint32_t BankGroupLoadBalancer::selectHeaviestStorageBank(uint32_t groupId) {
 }
 
 uint32_t BankGroupLoadBalancer::selectLightestGroup(const std::vector<uint32_t>& candidates) {
-    if (candidates.empty()) return 0;
+    if (candidates.empty()) return UINT32_MAX;
     
     uint32_t lightestGroup = candidates[0];
     double minLoad = calculateGroupLoad(lightestGroup);
@@ -371,7 +381,7 @@ void BankGroupLoadBalancer::reassignStorageBankToGroup(uint32_t storageBankId, u
     uint32_t sourceActiveBank = findActiveBankInGroup(sourceGroupId);
     uint32_t targetActiveBank = findActiveBankInGroup(targetGroupId);
     
-    if (sourceActiveBank != 0 && targetActiveBank != 0) {
+    if (sourceActiveBank != UINT32_MAX && targetActiveBank != UINT32_MAX) {
         redistributeStorageBankTasks(storageBankId, sourceActiveBank, targetActiveBank);
     }
     
@@ -543,7 +553,7 @@ void BankGroupLoadBalancer::generateGroupReassignments() {
     // For each overloaded group, try to reassign its heaviest storage bank
     for (uint32_t overloadedGroup : overloadedGroups) {
         uint32_t heaviestStorageBank = selectHeaviestStorageBank(overloadedGroup);
-        if (heaviestStorageBank == 0) continue;
+        if (heaviestStorageBank == UINT32_MAX) continue;
         
         uint32_t taskCount = storageDataTaskCount[heaviestStorageBank];
         if (taskCount < MIN_DATA_PER_REASSIGNMENT) {
@@ -602,7 +612,7 @@ std::vector<uint32_t> BankGroupLoadBalancer::selectUnderloadedBanks() {
 }
 
 uint32_t BankGroupLoadBalancer::findBestTargetBank(Address addr, const std::vector<uint32_t>& candidates) {
-    if (candidates.empty()) return 0;
+    if (candidates.empty()) return UINT32_MAX;
     
     // Select the bank with the lowest load
     uint32_t bestBank = candidates[0];
@@ -670,7 +680,7 @@ void BankGroupLoadBalancer::rebalanceBetweenGroups() {
                 
                 // Select the bank with the lowest load in the source group to move to the target group
                 if (groupToBanks[sourceGroup].size() > 1) {
-                    uint32_t bankToMove = 0;
+                    uint32_t bankToMove = UINT32_MAX;
                     double minLoad = std::numeric_limits<double>::max();
                     
                     for (uint32_t bankId : groupToBanks[sourceGroup]) {
@@ -680,7 +690,7 @@ void BankGroupLoadBalancer::rebalanceBetweenGroups() {
                         }
                     }
                     
-                    if (bankToMove != 0) {
+                    if (bankToMove != UINT32_MAX) {
                         bankGroupCommands[bankToMove].addGroupReassignment(bankToMove, targetGroup);
                         logReassignmentDecision("Group rebalance", bankToMove, targetGroup, 0);
                     }
