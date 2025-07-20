@@ -111,7 +111,7 @@ void CommModule::commandLoadBalance(bool* needParentLevelLb) {
                 uint32_t totalRatio = activeRatio + storageRatio;
                 if (totalRatio > 0) {
                     // Assign bank types according to ratio
-                    // 确保Bank 0总是被分配为active bank
+
                     for (uint32_t i = 0; i < numBanks; i++) {
                         uint32_t position = i % totalRatio;
                         if (position < activeRatio) {
@@ -123,7 +123,7 @@ void CommModule::commandLoadBalance(bool* needParentLevelLb) {
                         }
                     }
                     
-                    // 验证至少有一个active bank
+                    
                     bool hasActiveBank = false;
                     for (uint32_t i = 0; i < numBanks; i++) {
                         if (activeFlags[i]) {

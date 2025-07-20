@@ -96,11 +96,14 @@ void BottomCommModule::handleInPacket(CommPacket* packet) {
             if (p->forLb()) {
                 this->taskUnit->setHasReceiveLbTask(true);
                 this->s_ScheduleInTasks.atomicInc(1); 
-                // info("module %s receive lb task, addr: %lu, toSteal: %lu, sig: %lu", 
-                //     this->getName(), p->getAddr(), this->toStealSize, p->getSignature());
+                DEBUG_LB_O("module %s receive lb task from bank %u, addr: %lu, taskId: %lu, toSteal: %lu", 
+                    this->getName(), p->fromCommId, p->getAddr(), p->task->taskId, this->toStealSize);
                 if (this->toStealSize >= 1) {
                     --this->toStealSize;
                 }
+            } else {
+                DEBUG_TASK_BEHAVIOR_O("module %s receive migrated task from bank %u, addr: %lu, taskId: %lu", 
+                    this->getName(), p->fromCommId, p->getAddr(), p->task->taskId);
             }
             p->task->readyCycle = p->readyCycle;
             this->taskUnit->taskEnqueue(p->task, avail);

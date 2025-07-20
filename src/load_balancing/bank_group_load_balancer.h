@@ -149,6 +149,11 @@ public:
     void migrateTasksBetweenBanks(uint32_t sourceBankId, uint32_t targetBankId, uint32_t taskCount);
     std::vector<Address> selectTasksForMigration(uint32_t sourceBankId, uint32_t taskCount);
     
+    // Real Bank Group task migration implementation
+    void executeRealTaskMigrations();
+    void migrateStorageBankTasks(uint32_t storageBankId, uint32_t sourceActiveBankId, uint32_t targetActiveBankId);
+    void printTaskUnitQueueSizes(const std::string& context);
+    
     // 辅助函数
     double calculateLoadFactor(uint32_t bankId);
     std::vector<uint32_t> selectOverloadedBanks();
@@ -207,6 +212,10 @@ private:
     
     // 命令缓存
     std::vector<BankGroupCommand> bankGroupCommands;
+    
+    // Task migration mapping tables for Bank Group reassignment
+    std::unordered_map<uint32_t, std::vector<uint32_t>> storageBankMigrationMap; // sourceActiveBank -> [storageBankIds]
+    std::unordered_map<uint32_t, uint32_t> activeBankTargetMap; // sourceActiveBank -> targetActiveBank
     
     // Phase 4: 验证和调试支持
     void validateBankGroupConfiguration();

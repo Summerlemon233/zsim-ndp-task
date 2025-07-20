@@ -80,6 +80,9 @@ class NUMAMap : public GlobAlloc {
         }
 
         uint32_t getNodeOfPage(const Address pageAddr);
+        
+        // Safe version that returns INVALID_NODE if page is not allocated
+        uint32_t getNodeOfPageSafe(const Address pageAddr);
 
         inline Address getPageAddress(const Address addr) {
             // NOTE: this must be equivalent to vAddr -> pLineAddr logic in filter_cache.h.

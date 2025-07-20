@@ -188,13 +188,14 @@ PimBridgeTaskUnit::PimBridgeTaskUnit(const std::string& _name, uint32_t _tuId,
 
 
 void PimBridgeTaskUnit::assignNewTask(TaskPtr t, Hint* hint) {
-    //info("Assigning new Tasks");
+    
     assert(hint->dataPtr != 0);
     
     uint32_t nodeId;
     
     // Unified logic for both first-round and non-first-round tasks
     if (hint->location >= 0) {
+        info("Assigning new Tasks");
         // Explicit location specified - validate and potentially auto-route
         assert_msg((uint32_t)hint->location < zinfo->numCores, 
             "Invalid NUMA node ID %d specified in hint. Must be less than numCores (%u)", 
@@ -225,8 +226,8 @@ void PimBridgeTaskUnit::assignNewTask(TaskPtr t, Hint* hint) {
             } else {
                 // Data is on a storage node, route to responsible active node
                 nodeId = zinfo->storageToActiveMap[dataNodeId];
-                info("Computation relocation: data at storage node %d, task routed to active node %d", 
-                     dataNodeId, nodeId);
+                // info("Computation relocation: data at storage node %d, task routed to active node %d", 
+                //      dataNodeId, nodeId);
             }
         } else {
             // Fallback to original behavior if compute relocation is disabled
@@ -266,4 +267,71 @@ void PimBridgeTaskUnit::setCommModule(BottomCommModule* _commModule) {
     this->commModule = _commModule; 
     ((PimBridgeTaskUnitKernel*)taskUnit1)->commModule = _commModule;
     ((PimBridgeTaskUnitKernel*)taskUnit2)->commModule = _commModule;
+}
+
+std::vector<TaskPtr> PimBridgeTaskUnitKernel::extractTasksForStorageBank(uint32_t storageBankId, uint32_t maxTasks) {
+    std::vector<TaskPtr> extractedTasks;
+    std::vector<TaskPtr> remainingTasks;
+    
+    // Extract tasks from priority queue (need to rebuild queue)
+    while (!taskQueue.empty() && extractedTasks.size() < maxTasks) {
+        TaskPtr task = taskQueue.top();
+        taskQueue.pop();
+        
+        if (isTaskForStorageBank(task, storageBankId)) {
+            extractedTasks.push_back(task);
+            DEBUG_TASK_BEHAVIOR_O("Extracted task %lu for storage bank %u from task unit %u", 
+                                 task->taskId, storageBankId, taskUnitId);
+        } else {
+            remainingTasks.push_back(task);
+        }
+    }
+    
+    // Put remaining tasks back to queue
+    while (!taskQueue.empty()) {
+        remainingTasks.push_back(taskQueue.top());
+        taskQueue.pop();
+    }
+    
+    for (TaskPtr task : remainingTasks) {
+        taskQueue.push(task);
+    }
+    
+    info("TaskUnit %u: Extracted %zu tasks for storage bank %u (requested %u)", 
+         taskUnitId, extractedTasks.size(), storageBankId, maxTasks);
+    
+    return extractedTasks;
+}
+
+void PimBridgeTaskUnitKernel::injectTasksFromMigration(const std::vector<TaskPtr>& tasks) {
+    for (TaskPtr task : tasks) {
+        taskQueue.push(task);
+        DEBUG_TASK_BEHAVIOR_O("Injected migrated task %lu into task unit %u", 
+                             task->taskId, taskUnitId);
+    }
+    
+    info("TaskUnit %u: Injected %zu migrated tasks into queue", taskUnitId, tasks.size());
+}
+
+uint32_t PimBridgeTaskUnitKernel::countTasksForStorageBank(uint32_t storageBankId) {
+    uint32_t count = 0;
+    std::vector<TaskPtr> allTasks;
+    
+    // Count tasks in priority queue (need to rebuild queue)
+    while (!taskQueue.empty()) {
+        TaskPtr task = taskQueue.top();
+        taskQueue.pop();
+        allTasks.push_back(task);
+        
+        if (isTaskForStorageBank(task, storageBankId)) {
+            count++;
+        }
+    }
+    
+    // Restore the queue
+    for (TaskPtr task : allTasks) {
+        taskQueue.push(task);
+    }
+    
+    return count;
 }

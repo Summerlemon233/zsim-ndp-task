@@ -401,6 +401,13 @@ uint32_t NUMAMap::getNodeOfPage(const Address pageAddr) {
     return node;
 }
 
+uint32_t NUMAMap::getNodeOfPageSafe(const Address pageAddr) {
+    if (unlikely(!pageNodeMap->isPresent(pageAddr))) {
+        return INVALID_NODE;
+    }
+    return pageNodeMap->get(pageAddr);
+}
+
 void NUMAMap::allocateFromCore(const Address addr, const uint32_t cid) {
     auto pageAddr = getPageAddress(addr);
     if (unlikely(!pageNodeMap->isPresent(pageAddr))) {

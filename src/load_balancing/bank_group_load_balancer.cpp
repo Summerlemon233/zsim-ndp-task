@@ -1,7 +1,11 @@
 #include "bank_group_load_balancer.h"
 #include "comm_support/comm_module.h"
+#include "comm_support/comm_packet.h"
+#include "task_support/task_unit.h"
+#include "core.h"
 #include "debug.h"
 #include "log.h"
+#include "zsim.h"
 #include <algorithm>
 #include <cmath>
 
@@ -50,6 +54,21 @@ void BankGroupLoadBalancer::initializeBankTypes(const std::vector<bool>& activeF
     
     info("Initialized bank types: %lu active banks, %lu storage banks", 
          (unsigned long)activeBankList.size(), (unsigned long)(totalBanks - activeBankList.size()));
+    
+    // Debug: Print first few active and storage banks
+    info("DEBUG: First 10 Active Banks:");
+    for (size_t i = 0; i < std::min(activeBankList.size(), (size_t)10); i++) {
+        info("  Active Bank %u", activeBankList[i]);
+    }
+    
+    info("DEBUG: First 10 Storage Banks:");
+    int count = 0;
+    for (uint32_t i = 0; i < totalBanks && count < 10; i++) {
+        if (isStorageBank[i]) {
+            info("  Storage Bank %u", i);
+            count++;
+        }
+    }
 }
 
 void BankGroupLoadBalancer::initializeBankGroups(uint32_t groupCount) {
@@ -122,42 +141,58 @@ void BankGroupLoadBalancer::updateBankTaskClassification(const std::vector<uint3
     }
     storageDataTaskCount.assign(totalBanks, 0);
     
-    // Traverse each compute bank's task queue
+    // Traverse each compute bank's task queue and classify tasks based on actual data locations
     for (uint32_t activeBankId : activeBankList) {
-        uint32_t totalTasks = queueLengths[activeBankId];
+        if (activeBankId >= zinfo->taskUnits.size()) {
+            warn("Invalid active bank ID: %u", activeBankId);
+            continue;
+        }
         
-        // Get task classification info from the communication module
-        // Note: CommModule instance should be obtained in some way
-        // Temporary simplified implementation
-        uint32_t localTasks = totalTasks * 3 / 10;
-        uint32_t managedTasks = totalTasks - localTasks;
+        auto taskUnit = zinfo->taskUnits[activeBankId]->getCurUnit();
+        if (!taskUnit) {
+            warn("Task unit %u is null", activeBankId);
+            continue;
+        }
         
-        localDataTaskCount[activeBankId] = localTasks;
-        
-        // Assign managed tasks to storage banks in the group
+        // Get the current group ID for this active bank
         uint32_t groupId = bankToGroup[activeBankId];
         const auto& groupBanks = groupToBanks[groupId];
         
+        // Get storage banks in this group
         std::vector<uint32_t> storageBanksInGroup;
         for (uint32_t bankId : groupBanks) {
-            if (isStorageBank[bankId]) {
+            if (bankId < isStorageBank.size() && isStorageBank[bankId]) {
                 storageBanksInGroup.push_back(bankId);
             }
         }
         
-        // Evenly distribute managed tasks to storage banks
-        if (!storageBanksInGroup.empty()) {
-            uint32_t tasksPerStorage = managedTasks / storageBanksInGroup.size();
-            uint32_t remainingTasks = managedTasks % storageBanksInGroup.size();
+        // Count tasks for each storage bank in the group using actual task classification
+        uint32_t localTasks = 0;
+        uint32_t totalManagedTasks = 0;
+        
+        info("DEBUG: Analyzing tasks for Active Bank %u (Group %u), Storage Banks in group: %zu",
+             activeBankId, groupId, storageBanksInGroup.size());
+        
+        for (uint32_t storageBankId : storageBanksInGroup) {
+            uint32_t tasksForThisStorageBank = taskUnit->countTasksForStorageBank(storageBankId);
+            info("DEBUG: Storage Bank %u has %u tasks managed by Active Bank %u",
+                 storageBankId, tasksForThisStorageBank, activeBankId);
             
-            for (size_t i = 0; i < storageBanksInGroup.size(); i++) {
-                uint32_t storageBankId = storageBanksInGroup[i];
-                uint32_t taskCount = tasksPerStorage + (i < remainingTasks ? 1 : 0);
-                
-                managedDataTaskCount[activeBankId][storageBankId] = taskCount;
-                storageDataTaskCount[storageBankId] += taskCount;
+            if (tasksForThisStorageBank > 0) {
+                managedDataTaskCount[activeBankId][storageBankId] = tasksForThisStorageBank;
+                storageDataTaskCount[storageBankId] += tasksForThisStorageBank;
+                totalManagedTasks += tasksForThisStorageBank;
             }
         }
+        
+        // Local tasks = total tasks - managed tasks
+        uint32_t totalTasks = queueLengths[activeBankId];
+        localTasks = (totalTasks >= totalManagedTasks) ? (totalTasks - totalManagedTasks) : 0;
+        
+        localDataTaskCount[activeBankId] = localTasks;
+        
+        info("Bank %u task classification: total=%u, local=%u, managed=%u",
+             activeBankId, totalTasks, localTasks, totalManagedTasks);
     }
     
     // Basic validation: ensure the sum of classified tasks equals the total number of tasks
@@ -374,16 +409,27 @@ void BankGroupLoadBalancer::reassignStorageBankToGroup(uint32_t storageBankId, u
         return;
     }
     
-    // Update bank-to-group mapping
-    updateStorageBankMapping(storageBankId, targetGroupId);
-    
-    // Reassign tasks on the storage bank
+    // Get related active banks
     uint32_t sourceActiveBank = findActiveBankInGroup(sourceGroupId);
     uint32_t targetActiveBank = findActiveBankInGroup(targetGroupId);
     
-    if (sourceActiveBank != UINT32_MAX && targetActiveBank != UINT32_MAX) {
-        redistributeStorageBankTasks(storageBankId, sourceActiveBank, targetActiveBank);
+    if (sourceActiveBank == UINT32_MAX || targetActiveBank == UINT32_MAX) {
+        warn("Cannot find active banks for reassignment: source group %u, target group %u", 
+             sourceGroupId, targetGroupId);
+        return;
     }
+    
+    info("Reassigning Storage Bank %u from Group %u (Active Bank %u) to Group %u (Active Bank %u)",
+         storageBankId, sourceGroupId, sourceActiveBank, targetGroupId, targetActiveBank);
+    
+    // First execute task migration (THIS IS THE KEY CHANGE)
+    migrateStorageBankTasks(storageBankId, sourceActiveBank, targetActiveBank);
+    
+    // Then update bank group mapping
+    updateStorageBankMapping(storageBankId, targetGroupId);
+    
+    // Finally update statistics
+    redistributeStorageBankTasks(storageBankId, sourceActiveBank, targetActiveBank);
     
     info("Successfully reassigned storage bank %u from group %u to group %u", 
          storageBankId, sourceGroupId, targetGroupId);
@@ -465,6 +511,9 @@ void BankGroupLoadBalancer::executeStorageBankReassignments() {
 void BankGroupLoadBalancer::generateCommand(bool* needParentLevelLb) {
     resetCommands();
     
+    // Print queue sizes before load balancing
+    printTaskUnitQueueSizes("BEFORE Load Balancing");
+    
     // Update load status
     // updateBankLoads() should be called before this function
     
@@ -496,22 +545,25 @@ void BankGroupLoadBalancer::generateCommand(bool* needParentLevelLb) {
     // Generate Bank Group reassignment strategy
     generateGroupReassignments();
     
-    // Generate task migration strategy
-    if (enableTaskMigration) {
-        generateTaskMigrations();
-        totalTaskMigrations++;
-    }
-    
-    // Execute storage bank reassignment
+    // Execute storage bank reassignment (this will trigger real task migration)
     if (enableStorageBankReassignment) {
         executeStorageBankReassignments();
         totalStorageBankReassignments++;
     }
     
-    // Execute task migrations
+    // Generate task migration strategy (traditional within-group migration)
+    if (enableTaskMigration) {
+        generateTaskMigrations();
+        totalTaskMigrations++;
+    }
+    
+    // Execute task migrations (traditional)
     if (enableTaskMigration) {
         executeTaskMigrations();
     }
+    
+    // Print queue sizes after load balancing
+    printTaskUnitQueueSizes("AFTER Load Balancing");
     
     // Check if parent level load balancing is needed
     bool hasCommands = false;
@@ -703,7 +755,7 @@ void BankGroupLoadBalancer::rebalanceBetweenGroups() {
 void BankGroupLoadBalancer::assignLbTarget(const std::vector<DataHotness>& outInfo) {
     // Process data hotness information for future optimization
     // For now, we skip data reassignment and focus on Bank Group remapping and task migration
-    info("Processed %zu data hotness entries (data reassignment disabled)", outInfo.size());
+    // info("Processed %zu data hotness entries (data reassignment disabled)", outInfo.size());
 }
 
 void BankGroupLoadBalancer::resetCommands() {
@@ -844,6 +896,140 @@ std::vector<Address> BankGroupLoadBalancer::selectTasksForMigration(uint32_t sou
     
     info("Selected %zu tasks for migration from bank %u", selectedTasks.size(), sourceBankId);
     return selectedTasks;
+}
+
+void BankGroupLoadBalancer::printTaskUnitQueueSizes(const std::string& context) {
+    info("--- Global TaskUnit Queue Sizes %s ---", context.c_str());
+    for (size_t i = 0; i < zinfo->taskUnits.size(); i++) {
+        TaskUnit* tu = zinfo->taskUnits[i];
+        info("TaskUnit %zu (%s): Ready tasks: %lu, All tasks: %lu", 
+            i, tu->getName(), 
+            tu->getCurUnit()->getReadyTaskQueueSize(),
+            tu->getCurUnit()->getAllTaskQueueSize());
+    }
+    info("--- End TaskUnit Queue Sizes %s ---", context.c_str());
+}
+
+void BankGroupLoadBalancer::executeRealTaskMigrations() {
+    info("Starting real Bank Group task migrations");
+    
+    // Clear previous migration mappings
+    storageBankMigrationMap.clear();
+    activeBankTargetMap.clear();
+    
+    // Build migration mappings from storage bank reassignments
+    for (uint32_t activeBankId : activeBankList) {
+        const auto& command = bankGroupCommands[activeBankId];
+        const auto& storageBankReassignments = command.getStorageBankReassignments();
+        
+        for (const auto& reassignment : storageBankReassignments) {
+            uint32_t sourceActiveBankId = findActiveBankInGroup(reassignment.sourceGroupId);
+            uint32_t targetActiveBankId = findActiveBankInGroup(reassignment.targetGroupId);
+            
+            if (sourceActiveBankId != UINT32_MAX && targetActiveBankId != UINT32_MAX) {
+                storageBankMigrationMap[sourceActiveBankId].push_back(reassignment.storageBankId);
+                activeBankTargetMap[sourceActiveBankId] = targetActiveBankId;
+                
+                info("Planned migration: Storage Bank %u from Active Bank %u to Active Bank %u",
+                     reassignment.storageBankId, sourceActiveBankId, targetActiveBankId);
+            }
+        }
+    }
+    
+    // Execute task migrations for each source active bank
+    for (const auto& entry : storageBankMigrationMap) {
+        uint32_t sourceActiveBankId = entry.first;
+        const std::vector<uint32_t>& storageBanksToRelease = entry.second;
+        uint32_t targetActiveBankId = activeBankTargetMap[sourceActiveBankId];
+        
+        info("Migrating tasks from Active Bank %u to Active Bank %u for %zu storage banks",
+             sourceActiveBankId, targetActiveBankId, storageBanksToRelease.size());
+        
+        // Migrate tasks for each storage bank being reassigned
+        for (uint32_t storageBankId : storageBanksToRelease) {
+            migrateStorageBankTasks(storageBankId, sourceActiveBankId, targetActiveBankId);
+        }
+    }
+    
+    info("Real Bank Group task migrations completed");
+}
+
+void BankGroupLoadBalancer::migrateStorageBankTasks(uint32_t storageBankId, 
+                                                   uint32_t sourceActiveBankId, 
+                                                   uint32_t targetActiveBankId) {
+    info("Migrating tasks for Storage Bank %u from Active Bank %u to Active Bank %u",
+         storageBankId, sourceActiveBankId, targetActiveBankId);
+    
+    // Get source task unit
+    if (sourceActiveBankId >= zinfo->taskUnits.size() || targetActiveBankId >= zinfo->taskUnits.size()) {
+        warn("Invalid active bank IDs: source=%u, target=%u", sourceActiveBankId, targetActiveBankId);
+        return;
+    }
+    
+    auto sourceTaskUnit = zinfo->taskUnits[sourceActiveBankId]->getCurUnit();
+    if (!sourceTaskUnit) {
+        warn("Source task unit %u is null", sourceActiveBankId);
+        return;
+    }
+    
+    // Count tasks for this storage bank
+    uint32_t tasksForStorageBank = sourceTaskUnit->countTasksForStorageBank(storageBankId);
+    
+    if (tasksForStorageBank == 0) {
+        info("No tasks to migrate for Storage Bank %u", storageBankId);
+        return;
+    }
+    
+    info("Found %u tasks for Storage Bank %u in Active Bank %u", 
+         tasksForStorageBank, storageBankId, sourceActiveBankId);
+    
+    // Extract tasks from source active bank
+    std::vector<TaskPtr> tasksToMigrate = sourceTaskUnit->extractTasksForStorageBank(storageBankId, tasksForStorageBank);
+    
+    if (tasksToMigrate.empty()) {
+        info("No tasks extracted for Storage Bank %u from Active Bank %u", storageBankId, sourceActiveBankId);
+        return;
+    }
+    
+    info("Extracted %zu tasks for Storage Bank %u from Active Bank %u",
+         tasksToMigrate.size(), storageBankId, sourceActiveBankId);
+    
+    // Use TaskCommPacket to transfer tasks
+    uint64_t curCycle = zinfo->cores[sourceActiveBankId]->getCurCycle();
+    for (TaskPtr task : tasksToMigrate) {
+        TaskCommPacket* p = new TaskCommPacket(
+            task->timeStamp,        // Keep original timestamp
+            curCycle,               // Current cycle
+            0,                      // fromLevel
+            sourceActiveBankId,     // Source Active Bank
+            1,                      // toLevel
+            targetActiveBankId,     // Target Active Bank
+            task,                   // Task pointer
+            2                       // priority=2 for load balancing task migration
+        );
+        
+        auto commModule = zinfo->commModules[0][sourceActiveBankId];
+        if (commModule) {
+            commModule->handleOutPacket(p);
+            DEBUG_LB_O("Migrated task %lu from Active Bank %u to Active Bank %u for Storage Bank %u",
+                      task->taskId, sourceActiveBankId, targetActiveBankId, storageBankId);
+        } else {
+            warn("Communication module for Active Bank %u is null", sourceActiveBankId);
+            delete p;
+        }
+    }
+    
+    // Update statistics
+    if (managedDataTaskCount[sourceActiveBankId].count(storageBankId)) {
+        uint32_t migratedCount = managedDataTaskCount[sourceActiveBankId][storageBankId];
+        managedDataTaskCount[sourceActiveBankId].erase(storageBankId);
+        managedDataTaskCount[targetActiveBankId][storageBankId] = migratedCount;
+        
+        info("Updated statistics: migrated %u tasks for Storage Bank %u", migratedCount, storageBankId);
+    }
+    
+    info("Task migration completed for Storage Bank %u: %zu tasks from Active Bank %u to Active Bank %u",
+         storageBankId, tasksToMigrate.size(), sourceActiveBankId, targetActiveBankId);
 }
 
 // ===== Phase 4: Validation and Debug Support =====

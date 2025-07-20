@@ -4,8 +4,55 @@
 #include "zsim.h"
 #include "core.h"
 #include "task_support/task_timing_core.h"
+#include "process_local_val.h"
 
-using namespace task_support;
+bool TaskUnitKernel::isTaskForStorageBank(Task* task, uint32_t storageBankId) {
+    // Basic validation: check if task and hint are valid
+    if (!task || !task->hint) {
+        return false;
+    }
+    
+    // Check if data pointer is valid (not null and within reasonable range)
+    Address dataPtr = task->hint->dataPtr;
+    if (dataPtr == 0 || dataPtr < 0x1000 || dataPtr > 0x7fffffffffff) {
+        return false;
+    }
+    
+    uint32_t nodeId;
+    
+    // First try to get the node ID if the page has been allocated
+    Address lbPageAddr = zinfo->numaMap->getLbPageAddress(dataPtr);
+    nodeId = zinfo->numaMap->getNodeOfPageSafe(lbPageAddr);
+    
+    if (nodeId == NUMAMap::INVALID_NODE) {
+        // Page not allocated yet, calculate which node it should belong to using line address
+        Address lineAddr = dataPtr >> lineBits;  // Convert to line address
+        nodeId = zinfo->numaMap->getNodeOfLineAddr(lineAddr);
+        
+        // Add debug information for the first few calls
+        static int debugCount = 0;
+        if (debugCount < 10) {
+            info("DEBUG isTaskForStorageBank (calculated): task %lu, dataPtr=0x%lx, pageAddr=0x%lx, lineAddr=0x%lx, calculatedNodeId=%u, storageBankId=%u, match=%s",
+                 task->taskId, dataPtr, lbPageAddr, lineAddr, nodeId, storageBankId,
+                 (nodeId == storageBankId) ? "YES" : "NO");
+            debugCount++;
+        }
+    } else {
+        // Page already allocated, use the assigned node
+        static int debugAllocatedCount = 0;
+        if (debugAllocatedCount < 10) {
+            info("DEBUG isTaskForStorageBank (allocated): task %lu, dataPtr=0x%lx, pageAddr=0x%lx, allocatedNodeId=%u, storageBankId=%u, match=%s",
+                 task->taskId, dataPtr, lbPageAddr, nodeId, storageBankId,
+                 (nodeId == storageBankId) ? "YES" : "NO");
+            debugAllocatedCount++;
+        }
+    }
+    
+    // Return true if the node matches the specified storage bank
+    return (nodeId == storageBankId);
+}
+
+namespace task_support {
 
 TaskUnit::TaskUnit(const std::string& _name, uint32_t _tuId, TaskUnitManager* _tum)
     : name(_name), taskUnitId(_tuId), tum(_tum), endTask(nullptr), 
@@ -155,3 +202,5 @@ void TaskUnit::computeExecuteSpeed() {
     uint64_t numCycle = ((TaskTimingCore*)zinfo->cores[taskUnitId])->getCurWorkCycle();
     this->executeSpeed = (double)numTask / numCycle;
 }
+
+} // namespace task_support

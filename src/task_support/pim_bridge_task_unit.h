@@ -34,6 +34,11 @@ public:
         const LbCommand& command, 
         std::vector<DataHotness>& outInfo) override;
     
+    // Bank Group load balancing task migration interfaces
+    std::vector<TaskPtr> extractTasksForStorageBank(uint32_t storageBankId, uint32_t maxTasks) override;
+    void injectTasksFromMigration(const std::vector<TaskPtr>& tasks) override;
+    uint32_t countTasksForStorageBank(uint32_t storageBankId) override;
+    
     void setCommModule(BottomCommModule* _commModule) {
         this->commModule = _commModule;
     }

@@ -36,10 +36,19 @@ public:
         const pimbridge::LbCommand& command, 
         std::vector<pimbridge::DataHotness>& outInfo) {}
 
+    // Bank Group load balancing task migration interfaces
+    virtual std::vector<TaskPtr> extractTasksForStorageBank(uint32_t storageBankId, uint32_t maxTasks) { return std::vector<TaskPtr>(); }
+    virtual void injectTasksFromMigration(const std::vector<TaskPtr>& tasks) {}
+    virtual uint32_t countTasksForStorageBank(uint32_t storageBankId) { return 0; }
+
     // for ReserveBased;
     virtual void prepareLbState() {}
 
     void setCurTs(uint64_t ts) { this->curTs = ts; }
+
+protected:
+    // Helper function to determine if a task belongs to a specific storage bank
+    bool isTaskForStorageBank(TaskPtr task, uint32_t storageBankId);
 
     friend class TaskUnit;
 };
