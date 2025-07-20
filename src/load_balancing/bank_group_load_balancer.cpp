@@ -109,6 +109,34 @@ void BankGroupLoadBalancer::initializeBankGroups(uint32_t groupCount) {
     }
     
     info("Initialized %u bank groups with %u active banks", numGroups, (uint32_t)activeBankList.size());
+    
+    // Debug: Print detailed group mappings
+    for (uint32_t groupId = 0; groupId < numGroups; groupId++) {
+        const auto& groupBanks = groupToBanks[groupId];
+        std::string groupInfo = "Group " + std::to_string(groupId) + ": ";
+        
+        // Find active bank
+        uint32_t activeBankId = UINT32_MAX;
+        for (uint32_t bankId : groupBanks) {
+            if (isActiveBank[bankId]) {
+                activeBankId = bankId;
+                break;
+            }
+        }
+        
+        groupInfo += "Active=" + std::to_string(activeBankId) + ", Storage=[";
+        bool first = true;
+        for (uint32_t bankId : groupBanks) {
+            if (isStorageBank[bankId]) {
+                if (!first) groupInfo += ",";
+                groupInfo += std::to_string(bankId);
+                first = false;
+            }
+        }
+        groupInfo += "]";
+        
+        info("DEBUG: %s", groupInfo.c_str());
+    }
 }
 
 void BankGroupLoadBalancer::updateBankLoads(const std::vector<uint32_t>& queueLengths) {
@@ -173,6 +201,9 @@ void BankGroupLoadBalancer::updateBankTaskClassification(const std::vector<uint3
         info("DEBUG: Analyzing tasks for Active Bank %u (Group %u), Storage Banks in group: %zu",
              activeBankId, groupId, storageBanksInGroup.size());
         
+        uint32_t totalTasksInQueue = queueLengths[activeBankId];
+        info("DEBUG: Active Bank %u has %u total tasks in queue", activeBankId, totalTasksInQueue);
+        
         for (uint32_t storageBankId : storageBanksInGroup) {
             uint32_t tasksForThisStorageBank = taskUnit->countTasksForStorageBank(storageBankId);
             info("DEBUG: Storage Bank %u has %u tasks managed by Active Bank %u",
@@ -184,6 +215,10 @@ void BankGroupLoadBalancer::updateBankTaskClassification(const std::vector<uint3
                 totalManagedTasks += tasksForThisStorageBank;
             }
         }
+        
+        // Check if we're missing storage banks that should be in this group
+        info("DEBUG: Active Bank %u summary - total queue: %u, managed tasks found: %u, storage banks checked: %zu",
+             activeBankId, totalTasksInQueue, totalManagedTasks, storageBanksInGroup.size());
         
         // Local tasks = total tasks - managed tasks
         uint32_t totalTasks = queueLengths[activeBankId];

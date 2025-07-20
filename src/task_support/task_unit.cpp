@@ -19,6 +19,7 @@ bool TaskUnitKernel::isTaskForStorageBank(Task* task, uint32_t storageBankId) {
     }
     
     uint32_t nodeId;
+    bool pageAllocated = false;
     
     // First try to get the node ID if the page has been allocated
     Address lbPageAddr = zinfo->numaMap->getLbPageAddress(dataPtr);
@@ -28,21 +29,23 @@ bool TaskUnitKernel::isTaskForStorageBank(Task* task, uint32_t storageBankId) {
         // Page not allocated yet, calculate which node it should belong to using line address
         Address lineAddr = dataPtr >> lineBits;  // Convert to line address
         nodeId = zinfo->numaMap->getNodeOfLineAddr(lineAddr);
+        pageAllocated = false;
         
         // Add debug information for the first few calls
         static int debugCount = 0;
-        if (debugCount < 10) {
-            info("DEBUG isTaskForStorageBank (calculated): task %lu, dataPtr=0x%lx, pageAddr=0x%lx, lineAddr=0x%lx, calculatedNodeId=%u, storageBankId=%u, match=%s",
-                 task->taskId, dataPtr, lbPageAddr, lineAddr, nodeId, storageBankId,
+        if (debugCount < 20) {  // Increase debug count to see more cases
+            info("DEBUG isTaskForStorageBank (calculated): task %lu, dataPtr=0x%lx, pageAddr=0x%lx, lineAddr=0x%lx, calculatedNodeId=%u, storageBankId=%u, allocated=%s, match=%s",
+                 task->taskId, dataPtr, lbPageAddr, lineAddr, nodeId, storageBankId, "NO",
                  (nodeId == storageBankId) ? "YES" : "NO");
             debugCount++;
         }
     } else {
         // Page already allocated, use the assigned node
+        pageAllocated = true;
         static int debugAllocatedCount = 0;
-        if (debugAllocatedCount < 10) {
-            info("DEBUG isTaskForStorageBank (allocated): task %lu, dataPtr=0x%lx, pageAddr=0x%lx, allocatedNodeId=%u, storageBankId=%u, match=%s",
-                 task->taskId, dataPtr, lbPageAddr, nodeId, storageBankId,
+        if (debugAllocatedCount < 20) {  // Increase debug count to see more cases
+            info("DEBUG isTaskForStorageBank (allocated): task %lu, dataPtr=0x%lx, pageAddr=0x%lx, allocatedNodeId=%u, storageBankId=%u, allocated=%s, match=%s",
+                 task->taskId, dataPtr, lbPageAddr, nodeId, storageBankId, "YES",
                  (nodeId == storageBankId) ? "YES" : "NO");
             debugAllocatedCount++;
         }
